@@ -1,96 +1,359 @@
 /**
- * OpenCode Code Buddy Plugin - Single File Version
- * Simplified for direct loading
+ * OpenCode Code Buddy Plugin - Full Version (Single File)
+ * 
+ * AI Development Assistant Plugin - Project Memory, Knowledge Graph, Smart Task Execution
+ * Fully offline capable, persistent storage
  */
 
 import { tool } from "@opencode-ai/plugin";
+import * as fs from "fs";
+import * as path from "path";
 
-// Simple in-memory storage
-const memory = [];
-const entities = [];
+// ============================================
+// Local Storage System
+// ============================================
 
-export const CodeBuddyPlugin = async (ctx) => {
+class LocalStorage {
+    private baseDir: string;
+
+    constructor(projectDir: string) {
+        this.baseDir = path.join(projectDir, ".opencode", "code-buddy", "data");
+        this.ensureDir();
+    }
+
+    private ensureDir(): void {
+        if (!fs.existsSync(this.baseDir)) {
+            fs.mkdirSync(this.baseDir, { recursive: true });
+        }
+    }
+
+    read<T>(filename: string, defaultValue: T): T {
+        const filePath = path.join(this.baseDir, filename);
+        try {
+            if (fs.existsSync(filePath)) {
+                const content = fs.readFileSync(filePath, "utf-8");
+                return JSON.parse(content) as T;
+            }
+        } catch (error) {
+            console.log(`[code-buddy] Error reading ${filename}:`, error);
+        }
+        return defaultValue;
+    }
+
+    write<T>(filename: string, data: T): boolean {
+        const filePath = path.join(this.baseDir, filename);
+        try {
+            this.ensureDir();
+            fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
+            return true;
+        } catch (error) {
+            console.log(`[code-buddy] Error writing ${filename}:`, error);
+            return false;
+        }
+    }
+}
+
+// ============================================
+// Memory Types
+// ============================================
+
+type MemoryType = "decision" | "pattern" | "bugfix" | "lesson" | "feature" | "note";
+type EntityType = "decision" | "feature" | "component" | "file" | "bug_fix" | "lesson" | "pattern" | "technology";
+type ErrorType = "procedure-violation" | "workflow-skip" | "assumption-error" | "validation-skip" |
+    "responsibility-lack" | "firefighting" | "dependency-miss" | "integration-error" |
+    "deployment-error" | "other";
+type WorkflowPhase = "idle" | "planning" | "implementing" | "code-written" | "testing" |
+    "test-complete" | "reviewing" | "commit-ready" | "committed" | "deploying" | "completed";
+
+interface MemoryEntry {
+    id: string;
+    type: MemoryType;
+    title: string;
+    content: string;
+    tags: string[];
+    timestamp: number;
+}
+
+interface Entity {
+    id: string;
+    name: string;
+    type: EntityType;
+    observations: string[];
+    tags: string[];
+    createdAt: number;
+}
+
+interface Relation {
+    id: string;
+    from: string;
+    to: string;
+    type: string;
+    description?: string;
+    createdAt: number;
+}
+
+interface MistakeRecord {
+    id: string;
+    timestamp: number;
+    action: string;
+    errorType: ErrorType;
+    userCorrection: string;
+    correctMethod: string;
+    impact: string;
+    preventionMethod: string;
+    relatedRule?: string;
+}
+
+interface SessionState {
+    sessionId: string;
+    startTime: number;
+    lastActivity: number;
+    tasksCompleted: number;
+    memoriesCreated: number;
+    errorsRecorded: number;
+    currentPhase: string;
+}
+
+// ============================================
+// Main Plugin
+// ============================================
+
+export const CodeBuddyPlugin = async (ctx: { directory: string }) => {
     const { directory } = ctx;
+    const storage = new LocalStorage(directory);
 
-    console.log("[code-buddy] Plugin initialized - directory:", directory);
+    // Load data
+    let memories: MemoryEntry[] = storage.read("memory.json", []);
+    let entities: Entity[] = storage.read("entities.json", []);
+    let relations: Relation[] = storage.read("relations.json", []);
+    let mistakes: MistakeRecord[] = storage.read("mistakes.json", []);
+    let session: SessionState = {
+        sessionId: `session_${Date.now()}`,
+        startTime: Date.now(),
+        lastActivity: Date.now(),
+        tasksCompleted: 0,
+        memoriesCreated: 0,
+        errorsRecorded: 0,
+        currentPhase: "idle"
+    };
+
+    // Helper functions
+    const generateId = (prefix: string) => `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+
+    const saveMemories = () => storage.write("memory.json", memories);
+    const saveEntities = () => storage.write("entities.json", entities);
+    const saveRelations = () => storage.write("relations.json", relations);
+    const saveMistakes = () => storage.write("mistakes.json", mistakes);
+
+    const searchText = (items: any[], query: string, fields: string[]) => {
+        const lowerQuery = query.toLowerCase();
+        return items.filter(item =>
+            fields.some(field => {
+                const value = item[field];
+                if (typeof value === "string") return value.toLowerCase().includes(lowerQuery);
+                if (Array.isArray(value)) return value.some(v => String(v).toLowerCase().includes(lowerQuery));
+                return false;
+            })
+        );
+    };
+
+    const detectTaskType = (task: string) => {
+        const lower = task.toLowerCase();
+        if (/implement|build|create|add|feature/.test(lower)) return "implement";
+        if (/fix|bug|error|issue/.test(lower)) return "fix";
+        if (/refactor|improve|optimize/.test(lower)) return "refactor";
+        if (/test|spec/.test(lower)) return "test";
+        if (/doc|readme/.test(lower)) return "document";
+        if (/research|investigate/.test(lower)) return "research";
+        return "task";
+    };
+
+    const estimateComplexity = (task: string) => {
+        const wordCount = task.split(/\s+/).length;
+        if (wordCount < 10 || /simple|easy|quick/.test(task.toLowerCase())) return "low";
+        if (wordCount > 30 || /complex|difficult|large/.test(task.toLowerCase())) return "high";
+        return "medium";
+    };
+
+    console.log("[code-buddy] Plugin initialized - Full Version with persistent storage");
 
     return {
         tool: {
+            // ========================================
+            // HELP
+            // ========================================
             buddy_help: tool({
                 description: "Display help for all buddy commands",
-                args: {},
-                async execute() {
-                    return `# 🤖 Code Buddy Help
+                args: {
+                    command: tool.schema.string().optional().describe("Specific command name")
+                },
+                async execute(args) {
+                    if (args.command) {
+                        return `## 📖 Help for ${args.command}\n\nUse buddy_help() without arguments to see all commands.`;
+                    }
+                    return `# 🤖 Code Buddy Help (Full Version)
 
-## Available Commands
+## 🎯 Core Commands
+| Command | Description |
+|---------|-------------|
+| \`buddy_do(task)\` | Execute and analyze a task |
+| \`buddy_help()\` | Display this help |
 
-### 🎯 Core Commands
-- \`buddy_do(task)\` - Execute and analyze a development task
-- \`buddy_help()\` - Display this help
+## 🧠 Memory Commands
+| Command | Description |
+|---------|-------------|
+| \`buddy_remember(query)\` | Search memories |
+| \`buddy_remember_recent(limit)\` | Get recent memories |
+| \`buddy_remember_stats()\` | Memory statistics |
+| \`buddy_add_memory(title, content, type)\` | Add memory |
 
-### 🧠 Memory Commands  
-- \`buddy_remember(query)\` - Search project memories
-- \`buddy_add_memory(title, content, type)\` - Add a memory
+## 🔗 Knowledge Graph
+| Command | Description |
+|---------|-------------|
+| \`buddy_create_entity(name, type, observations)\` | Create entity |
+| \`buddy_search_entities(query)\` | Search entities |
+| \`buddy_create_relation(from, to, type)\` | Create relation |
 
-### 📊 Status Commands
-- \`buddy_status()\` - Show plugin status
+## 📝 Error Learning
+| Command | Description |
+|---------|-------------|
+| \`buddy_record_mistake(...)\` | Record AI mistake |
+| \`buddy_get_mistake_patterns()\` | Error pattern analysis |
+
+## 📋 Workflow
+| Command | Description |
+|---------|-------------|
+| \`buddy_get_workflow_guidance(phase)\` | Phase guidance |
+| \`buddy_get_session_health()\` | Session health |
 
 ---
-📴 All features work **offline**.`;
+📴 All features work **offline** with persistent storage.`;
                 }
             }),
 
+            // ========================================
+            // TASK EXECUTION
+            // ========================================
             buddy_do: tool({
                 description: "Execute a development task with automatic analysis and recording",
                 args: {
                     task: tool.schema.string().describe("Task description")
                 },
                 async execute(args) {
-                    const entry = {
-                        id: `task_${Date.now()}`,
-                        task: args.task,
-                        timestamp: Date.now(),
-                        type: detectTaskType(args.task)
+                    const taskType = detectTaskType(args.task);
+                    const complexity = estimateComplexity(args.task);
+
+                    const entry: MemoryEntry = {
+                        id: generateId("task"),
+                        type: "feature",
+                        title: `Task: ${args.task.substring(0, 50)}...`,
+                        content: args.task,
+                        tags: ["buddy-do", taskType, complexity],
+                        timestamp: Date.now()
                     };
-                    memory.push(entry);
+
+                    memories.push(entry);
+                    saveMemories();
+
+                    session.tasksCompleted++;
+                    session.memoriesCreated++;
+                    session.lastActivity = Date.now();
+
+                    const steps = {
+                        implement: ["Understand requirements", "Design solution", "Implement code", "Write tests", "Review"],
+                        fix: ["Reproduce issue", "Analyze root cause", "Implement fix", "Verify fix", "Add regression test"],
+                        refactor: ["Review current code", "Plan changes", "Refactor incrementally", "Test", "Document"],
+                        test: ["Identify scenarios", "Write test cases", "Run tests", "Fix failures", "Report"],
+                        document: ["Identify audience", "Outline content", "Write docs", "Add examples", "Review"],
+                        research: ["Define scope", "Gather info", "Analyze options", "Document findings", "Recommend"],
+                        task: ["Clarify goals", "Plan approach", "Execute", "Verify", "Document"]
+                    };
 
                     return `## 🎯 Task Recorded
 
 **Task**: ${args.task}
 **ID**: ${entry.id}
-**Type**: ${entry.type}
-**Time**: ${new Date().toLocaleString()}
+**Type**: ${taskType}
+**Complexity**: ${complexity}
 
 ### 📋 Suggested Steps
-1. Understand requirements
-2. Design solution
-3. Implement
-4. Test
-5. Review
+${(steps[taskType as keyof typeof steps] || steps.task).map((s, i) => `${i + 1}. ${s}`).join("\n")}
 
-💾 Task saved to memory.`;
+💾 Saved to memory. Use \`buddy_remember\` to recall later.`;
                 }
             }),
 
+            // ========================================
+            // MEMORY
+            // ========================================
             buddy_remember: tool({
                 description: "Search project memories",
                 args: {
-                    query: tool.schema.string().describe("Search query")
+                    query: tool.schema.string().describe("Search query"),
+                    limit: tool.schema.number().optional().describe("Max results (default: 5)"),
+                    type: tool.schema.string().optional().describe("Filter by type")
                 },
                 async execute(args) {
-                    const results = memory.filter(m =>
-                        m.task && m.task.toLowerCase().includes(args.query.toLowerCase())
-                    );
+                    let results = searchText(memories, args.query, ["title", "content", "tags"]);
+                    if (args.type) {
+                        results = results.filter(m => m.type === args.type);
+                    }
+                    results = results.slice(0, args.limit || 5);
 
                     if (results.length === 0) {
                         return `🔍 No memories found for "${args.query}"`;
                     }
 
-                    let msg = `## 🔍 Search Results for "${args.query}"\n\n`;
-                    for (const r of results) {
-                        msg += `- **${r.task}** (${r.type}) - ${new Date(r.timestamp).toLocaleDateString()}\n`;
+                    let msg = `## 🔍 Search Results for "${args.query}" (${results.length})\n\n`;
+                    for (const m of results) {
+                        msg += `### ${m.title}\n- **Type**: ${m.type}\n- **Date**: ${new Date(m.timestamp).toLocaleDateString()}\n- **Tags**: ${m.tags.join(", ")}\n\n${m.content.substring(0, 150)}...\n\n---\n\n`;
                     }
                     return msg;
+                }
+            }),
+
+            buddy_remember_recent: tool({
+                description: "Get recent memories",
+                args: {
+                    limit: tool.schema.number().optional().describe("Number of results (default: 5)")
+                },
+                async execute(args) {
+                    const recent = [...memories].sort((a, b) => b.timestamp - a.timestamp).slice(0, args.limit || 5);
+                    if (recent.length === 0) {
+                        return "📜 No memories yet. Use `buddy_do` to start!";
+                    }
+                    let msg = `## 📜 Recent Memories (${recent.length})\n\n`;
+                    for (const m of recent) {
+                        msg += `- **${m.title}** (${m.type}) - ${new Date(m.timestamp).toLocaleDateString()}\n`;
+                    }
+                    return msg;
+                }
+            }),
+
+            buddy_remember_stats: tool({
+                description: "Get memory and knowledge graph statistics",
+                args: {},
+                async execute() {
+                    const byType: Record<string, number> = {};
+                    for (const m of memories) {
+                        byType[m.type] = (byType[m.type] || 0) + 1;
+                    }
+                    return `## 📊 Statistics
+
+### 🧠 Memories
+- **Total**: ${memories.length}
+- **By Type**: ${Object.entries(byType).map(([t, c]) => `${t}(${c})`).join(", ") || "none"}
+
+### 🔗 Knowledge Graph
+- **Entities**: ${entities.length}
+- **Relations**: ${relations.length}
+
+### 📝 Error Learning
+- **Mistakes Recorded**: ${mistakes.length}
+
+### 💚 Session
+- **Tasks Completed**: ${session.tasksCompleted}
+- **Memories Created**: ${session.memoriesCreated}`;
                 }
             }),
 
@@ -99,48 +362,244 @@ export const CodeBuddyPlugin = async (ctx) => {
                 args: {
                     title: tool.schema.string().describe("Memory title"),
                     content: tool.schema.string().describe("Memory content"),
-                    type: tool.schema.string().describe("Type: decision, pattern, bugfix, lesson, feature, note")
+                    type: tool.schema.string().describe("Type: decision, pattern, bugfix, lesson, feature, note"),
+                    tags: tool.schema.array(tool.schema.string()).optional().describe("Tags")
                 },
                 async execute(args) {
-                    const entry = {
-                        id: `mem_${Date.now()}`,
+                    const entry: MemoryEntry = {
+                        id: generateId("mem"),
+                        type: args.type as MemoryType,
                         title: args.title,
                         content: args.content,
-                        type: args.type,
+                        tags: args.tags || [],
                         timestamp: Date.now()
                     };
-                    memory.push(entry);
-
-                    return `✅ Memory added: ${args.title}`;
+                    memories.push(entry);
+                    saveMemories();
+                    session.memoriesCreated++;
+                    return `✅ Memory added: **${args.title}**\n\nID: ${entry.id}\nType: ${args.type}`;
                 }
             }),
 
-            buddy_status: tool({
-                description: "Show plugin status",
+            // ========================================
+            // KNOWLEDGE GRAPH
+            // ========================================
+            buddy_create_entity: tool({
+                description: "Create a knowledge entity",
+                args: {
+                    name: tool.schema.string().describe("Entity name"),
+                    type: tool.schema.string().describe("Type: decision, feature, component, file, bug_fix, lesson, pattern, technology"),
+                    observations: tool.schema.array(tool.schema.string()).describe("Observations/facts"),
+                    tags: tool.schema.array(tool.schema.string()).optional().describe("Tags")
+                },
+                async execute(args) {
+                    const entity: Entity = {
+                        id: generateId("entity"),
+                        name: args.name,
+                        type: args.type as EntityType,
+                        observations: args.observations,
+                        tags: args.tags || [],
+                        createdAt: Date.now()
+                    };
+                    entities.push(entity);
+                    saveEntities();
+                    session.memoriesCreated++;
+                    return `✅ Entity created: **${args.name}**\n\nType: ${args.type}\nObservations:\n${args.observations.map(o => `- ${o}`).join("\n")}`;
+                }
+            }),
+
+            buddy_search_entities: tool({
+                description: "Search knowledge entities",
+                args: {
+                    query: tool.schema.string().describe("Search query"),
+                    limit: tool.schema.number().optional().describe("Max results (default: 10)")
+                },
+                async execute(args) {
+                    const results = searchText(entities, args.query, ["name", "observations", "tags"]).slice(0, args.limit || 10);
+                    if (results.length === 0) {
+                        return `🔍 No entities found for "${args.query}"`;
+                    }
+                    let msg = `## 🔗 Entities for "${args.query}" (${results.length})\n\n`;
+                    for (const e of results) {
+                        msg += `### ${e.name}\n- **Type**: ${e.type}\n- **Observations**: ${e.observations.slice(0, 2).join("; ")}\n\n`;
+                    }
+                    return msg;
+                }
+            }),
+
+            buddy_create_relation: tool({
+                description: "Create a relationship between entities",
+                args: {
+                    from: tool.schema.string().describe("Source entity"),
+                    to: tool.schema.string().describe("Target entity"),
+                    type: tool.schema.string().describe("Type: depends_on, implements, related_to, caused_by, fixed_by, uses, extends"),
+                    description: tool.schema.string().optional().describe("Description")
+                },
+                async execute(args) {
+                    const fromEntity = entities.find(e => e.name === args.from);
+                    const toEntity = entities.find(e => e.name === args.to);
+                    if (!fromEntity || !toEntity) {
+                        return `❌ Cannot create relation. Entity not found: ${!fromEntity ? args.from : args.to}`;
+                    }
+                    const relation: Relation = {
+                        id: generateId("rel"),
+                        from: args.from,
+                        to: args.to,
+                        type: args.type,
+                        description: args.description,
+                        createdAt: Date.now()
+                    };
+                    relations.push(relation);
+                    saveRelations();
+                    return `✅ Relation created: ${args.from} --[${args.type}]--> ${args.to}`;
+                }
+            }),
+
+            // ========================================
+            // ERROR LEARNING
+            // ========================================
+            buddy_record_mistake: tool({
+                description: "Record an AI mistake for learning",
+                args: {
+                    action: tool.schema.string().describe("Wrong action taken"),
+                    errorType: tool.schema.string().describe("Error type"),
+                    userCorrection: tool.schema.string().describe("User's correction"),
+                    correctMethod: tool.schema.string().describe("Correct approach"),
+                    impact: tool.schema.string().describe("Impact"),
+                    preventionMethod: tool.schema.string().describe("Prevention method"),
+                    relatedRule: tool.schema.string().optional().describe("Related rule")
+                },
+                async execute(args) {
+                    const record: MistakeRecord = {
+                        id: generateId("mistake"),
+                        timestamp: Date.now(),
+                        action: args.action,
+                        errorType: args.errorType as ErrorType,
+                        userCorrection: args.userCorrection,
+                        correctMethod: args.correctMethod,
+                        impact: args.impact,
+                        preventionMethod: args.preventionMethod,
+                        relatedRule: args.relatedRule
+                    };
+                    mistakes.push(record);
+                    saveMistakes();
+                    session.errorsRecorded++;
+                    return `## 📝 Mistake Recorded
+
+**ID**: ${record.id}
+**Type**: ${args.errorType}
+
+### ❌ Wrong Action
+${args.action}
+
+### ✅ Correct Method
+${args.correctMethod}
+
+### 🛡️ Prevention
+${args.preventionMethod}`;
+                }
+            }),
+
+            buddy_get_mistake_patterns: tool({
+                description: "Get error pattern analysis",
                 args: {},
                 async execute() {
-                    return `## 📊 Code Buddy Status
+                    if (mistakes.length === 0) {
+                        return "📝 No mistakes recorded yet. 🎉";
+                    }
+                    const byType: Record<string, number> = {};
+                    for (const m of mistakes) {
+                        byType[m.errorType] = (byType[m.errorType] || 0) + 1;
+                    }
+                    let msg = `## 📝 Error Pattern Analysis\n\n**Total**: ${mistakes.length}\n\n### By Type\n`;
+                    for (const [type, count] of Object.entries(byType)) {
+                        msg += `- ${type}: ${count}\n`;
+                    }
+                    msg += `\n### Recent Mistakes\n`;
+                    for (const m of mistakes.slice(-3)) {
+                        msg += `- ${m.action.substring(0, 50)}... (${m.errorType})\n`;
+                    }
+                    return msg;
+                }
+            }),
 
-**Memories**: ${memory.length}
-**Entities**: ${entities.length}
-**Directory**: ${directory}
-**Status**: ✅ Running
+            // ========================================
+            // WORKFLOW
+            // ========================================
+            buddy_get_workflow_guidance: tool({
+                description: "Get workflow guidance for current phase",
+                args: {
+                    phase: tool.schema.string().describe("Phase: idle, planning, implementing, code-written, testing, reviewing, commit-ready, deploying, completed"),
+                    filesChanged: tool.schema.array(tool.schema.string()).optional().describe("Changed files"),
+                    testsPassing: tool.schema.boolean().optional().describe("Tests passing?"),
+                    hasLintErrors: tool.schema.boolean().optional().describe("Lint errors?")
+                },
+                async execute(args) {
+                    session.currentPhase = args.phase;
+                    session.lastActivity = Date.now();
 
-Use \`buddy_help()\` for command list.`;
+                    const steps: Record<string, string[]> = {
+                        idle: ["📋 Define task goals", "🔍 Research existing code", "📝 Create plan"],
+                        planning: ["📐 Design interfaces", "🏗️ Confirm architecture", "✅ List acceptance criteria"],
+                        implementing: ["💻 Write core logic", "📝 Add comments", "🧪 Write tests"],
+                        "code-written": ["🧪 Run tests", "🔍 Check lint", "📖 Update docs"],
+                        testing: ["✅ Fix failing tests", "📊 Check coverage", "🔄 Iterate"],
+                        reviewing: ["💬 Address feedback", "🔧 Make changes", "✅ Get approval"],
+                        "commit-ready": ["📝 Write commit message", "🔄 Update branch", "✅ Commit"],
+                        deploying: ["🚀 Monitor deploy", "✅ Verify", "🔍 Check production"],
+                        completed: ["📚 Document lessons", "🎉 Celebrate!", "📋 Next task"]
+                    };
+
+                    const warnings: string[] = [];
+                    if (args.hasLintErrors) warnings.push("⚠️ Fix lint errors");
+                    if (args.testsPassing === false) warnings.push("❌ Tests failing");
+
+                    const progress = { idle: 0, planning: 10, implementing: 30, "code-written": 50, testing: 60, reviewing: 80, "commit-ready": 90, deploying: 98, completed: 100 };
+                    const pct = progress[args.phase as keyof typeof progress] || 0;
+                    const bar = "█".repeat(pct / 10) + "░".repeat(10 - pct / 10);
+
+                    return `## 📋 Workflow Guidance
+
+**Phase**: ${args.phase}
+**Progress**: ${bar} ${pct}%
+
+${warnings.length > 0 ? `### ⚠️ Warnings\n${warnings.join("\n")}\n` : ""}
+### 📋 Next Steps
+${(steps[args.phase] || steps.idle).join("\n")}`;
+                }
+            }),
+
+            buddy_get_session_health: tool({
+                description: "Check session health",
+                args: {},
+                async execute() {
+                    const duration = Date.now() - session.startTime;
+                    const hours = duration / (1000 * 60 * 60);
+                    const mins = Math.floor(duration / 60000);
+
+                    const warnings: string[] = [];
+                    if (hours > 4) warnings.push("⚠️ Working 4+ hours, take a break");
+                    if (hours > 2 && session.tasksCompleted === 0) warnings.push("💭 2+ hours without completing a task");
+
+                    const productivity = Math.min(100, Math.round((session.tasksCompleted * 30 + session.memoriesCreated * 20 + 30) - session.errorsRecorded * 5));
+                    const bar = "█".repeat(productivity / 10) + "░".repeat(10 - productivity / 10);
+
+                    return `## 💚 Session Health
+
+**Duration**: ${mins} minutes
+**Status**: ${warnings.length === 0 ? "Healthy ✅" : "Needs Attention ⚠️"}
+
+### 📊 Metrics
+- Tasks Completed: ${session.tasksCompleted}
+- Memories Created: ${session.memoriesCreated}
+- Errors Recorded: ${session.errorsRecorded}
+- Productivity: ${bar} ${productivity}%
+
+${warnings.length > 0 ? `### ⚠️ Warnings\n${warnings.join("\n")}` : ""}`;
                 }
             })
         }
     };
 };
-
-function detectTaskType(task) {
-    const lower = task.toLowerCase();
-    if (/implement|build|create|add|feature/.test(lower)) return "implement";
-    if (/fix|bug|error|issue/.test(lower)) return "fix";
-    if (/refactor|improve|optimize/.test(lower)) return "refactor";
-    if (/test|spec/.test(lower)) return "test";
-    if (/doc|readme/.test(lower)) return "document";
-    return "task";
-}
 
 export default CodeBuddyPlugin;
