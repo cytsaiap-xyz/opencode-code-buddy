@@ -177,21 +177,21 @@ export const CodeBuddyPlugin: Plugin = async (ctx) => {
         return "medium";
     };
 
-    // AI helper using OpenCode's built-in client
+    // AI helper - experimental feature
+    // Note: Direct AI calls from plugins have limited support in OpenCode
+    // The AI tools are designed to be called by the main AI assistant, not for internal use
     const askAI = async (prompt: string): Promise<string> => {
-        if (!client) {
-            return "[AI not available - using offline mode]";
-        }
-        try {
-            // Use OpenCode's current LLM
-            const response = await client.chat({
-                messages: [{ role: "user", content: prompt }]
-            });
-            return response.content || "[No response]";
-        } catch (error) {
-            console.log("[code-buddy] AI error:", error);
-            return "[AI request failed - using offline mode]";
-        }
+        // In plugin context, we cannot directly call the AI
+        // The tool's purpose is to instruct the main AI to process the request
+        // Return a formatted message that the AI will interpret
+        return `[AI Analysis Request]
+
+Please analyze and respond to the following:
+
+${prompt}
+
+---
+Note: This is a buddy_ask_ai tool call. Please provide a helpful response based on your knowledge.`;
     };
 
     console.log("[code-buddy] Plugin initialized - Full Version with persistent storage and AI integration");
