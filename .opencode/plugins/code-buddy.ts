@@ -117,12 +117,84 @@ interface SessionState {
 }
 
 // ============================================
+// LLM Configuration (OpenAI Compatible)
+// ============================================
+
+interface LLMConfig {
+    enabled: boolean;
+    provider: string;
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    maxTokens: number;
+    temperature: number;
+}
+
+interface PluginConfig {
+    llm: LLMConfig;
+    storage: {
+        dataDir: string;
+    };
+    features: {
+        memory: boolean;
+        knowledgeGraph: boolean;
+        errorLearning: boolean;
+        workflow: boolean;
+        ai: boolean;
+    };
+}
+
+const defaultConfig: PluginConfig = {
+    llm: {
+        enabled: true,
+        provider: "openai",
+        baseUrl: "https://api.openai.com/v1",
+        apiKey: "",
+        model: "gpt-4o-mini",
+        maxTokens: 2048,
+        temperature: 0.7
+    },
+    storage: {
+        dataDir: ".opencode/code-buddy/data"
+    },
+    features: {
+        memory: true,
+        knowledgeGraph: true,
+        errorLearning: true,
+        workflow: true,
+        ai: true
+    }
+};
+
+// ============================================
 // Main Plugin
 // ============================================
 
 export const CodeBuddyPlugin: Plugin = async (ctx) => {
     const { directory, client } = ctx;
     const storage = new LocalStorage(directory);
+
+    // Load configuration
+    const configPath = path.join(directory, ".opencode", "code-buddy", "config.json");
+    let config: PluginConfig = { ...defaultConfig };
+    try {
+        if (fs.existsSync(configPath)) {
+            const configContent = fs.readFileSync(configPath, "utf-8");
+            const loadedConfig = JSON.parse(configContent);
+            config = { ...defaultConfig, ...loadedConfig, llm: { ...defaultConfig.llm, ...loadedConfig.llm } };
+            console.log("[code-buddy] Config loaded from", configPath);
+        } else {
+            // Create default config file
+            const configDir = path.dirname(configPath);
+            if (!fs.existsSync(configDir)) {
+                fs.mkdirSync(configDir, { recursive: true });
+            }
+            fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 4), "utf-8");
+            console.log("[code-buddy] Default config created at", configPath);
+        }
+    } catch (error) {
+        console.log("[code-buddy] Error loading config:", error);
+    }
 
     // Load data
     let memories: MemoryEntry[] = storage.read("memory.json", []);
@@ -177,13 +249,37 @@ export const CodeBuddyPlugin: Plugin = async (ctx) => {
         return "medium";
     };
 
-    // AI helper - experimental feature
-    // Note: Direct AI calls from plugins have limited support in OpenCode
-    // The AI tools are designed to be called by the main AI assistant, not for internal use
+    // AI helper - supports OpenAI-compatible API or fallback to OpenCode's AI
     const askAI = async (prompt: string): Promise<string> => {
-        // In plugin context, we cannot directly call the AI
-        // The tool's purpose is to instruct the main AI to process the request
-        // Return a formatted message that the AI will interpret
+        // Try OpenAI-compatible API if configured
+        if (config.llm.enabled && config.llm.apiKey) {
+            try {
+                const response = await fetch(`${config.llm.baseUrl}/chat/completions`, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Authorization": `Bearer ${config.llm.apiKey}`
+                    },
+                    body: JSON.stringify({
+                        model: config.llm.model,
+                        messages: [{ role: "user", content: prompt }],
+                        max_tokens: config.llm.maxTokens,
+                        temperature: config.llm.temperature
+                    })
+                });
+
+                if (response.ok) {
+                    const data = await response.json() as { choices: Array<{ message: { content: string } }> };
+                    if (data.choices && data.choices[0]?.message?.content) {
+                        return data.choices[0].message.content;
+                    }
+                }
+            } catch (error) {
+                console.log("[code-buddy] OpenAI API error:", error);
+            }
+        }
+
+        // Fallback: Return structured prompt for OpenCode's AI to interpret
         return `[AI Analysis Request]
 
 Please analyze and respond to the following:
@@ -194,10 +290,82 @@ ${prompt}
 Note: This is a buddy_ask_ai tool call. Please provide a helpful response based on your knowledge.`;
     };
 
-    console.log("[code-buddy] Plugin initialized - Full Version with persistent storage and AI integration");
+    // Get LLM status
+    const getLLMStatus = (): string => {
+        if (config.llm.enabled && config.llm.apiKey) {
+            return `Connected (${config.llm.provider}: ${config.llm.model})`;
+        }
+        return "Using OpenCode's built-in AI";
+    };
+
+    console.log(`[code-buddy] Plugin initialized - LLM: ${getLLMStatus()}`);
+
 
     return {
         tool: {
+            // ========================================
+            // CONFIG
+            // ========================================
+            buddy_config: tool({
+                description: "View or update LLM configuration (OpenAI-compatible API)",
+                args: {
+                    action: tool.schema.string().optional().describe("Action: view, set_api_key, set_model, set_base_url"),
+                    value: tool.schema.string().optional().describe("Value for the setting")
+                },
+                async execute(args) {
+                    const action = args.action || "view";
+
+                    if (action === "view") {
+                        const safeConfig = {
+                            ...config.llm,
+                            apiKey: config.llm.apiKey ? "***configured***" : "(not set)"
+                        };
+                        return `## ⚙️ LLM Configuration
+
+**Status**: ${getLLMStatus()}
+
+### Current Settings
+| Setting | Value |
+|---------|-------|
+| Provider | ${safeConfig.provider} |
+| Base URL | ${safeConfig.baseUrl} |
+| Model | ${safeConfig.model} |
+| API Key | ${safeConfig.apiKey} |
+| Max Tokens | ${safeConfig.maxTokens} |
+| Temperature | ${safeConfig.temperature} |
+
+### Config File
+\`${configPath}\`
+
+### How to Configure
+1. Edit \`.opencode/code-buddy/config.json\`
+2. Or use: \`buddy_config("set_api_key", "your-key")\`
+3. Or use: \`buddy_config("set_model", "gpt-4o")\`
+4. Or use: \`buddy_config("set_base_url", "https://api.example.com/v1")\``;
+                    }
+
+                    if (action === "set_api_key" && args.value) {
+                        config.llm.apiKey = args.value;
+                        fs.writeFileSync(configPath, JSON.stringify(config, null, 4), "utf-8");
+                        return `✅ API Key updated successfully!\n\nLLM Status: ${getLLMStatus()}`;
+                    }
+
+                    if (action === "set_model" && args.value) {
+                        config.llm.model = args.value;
+                        fs.writeFileSync(configPath, JSON.stringify(config, null, 4), "utf-8");
+                        return `✅ Model updated to: ${args.value}`;
+                    }
+
+                    if (action === "set_base_url" && args.value) {
+                        config.llm.baseUrl = args.value;
+                        fs.writeFileSync(configPath, JSON.stringify(config, null, 4), "utf-8");
+                        return `✅ Base URL updated to: ${args.value}`;
+                    }
+
+                    return `❌ Unknown action: ${action}\n\nAvailable actions: view, set_api_key, set_model, set_base_url`;
+                }
+            }),
+
             // ========================================
             // HELP
             // ========================================
@@ -381,8 +549,9 @@ ${(steps[taskType as keyof typeof steps] || steps.task).map((s, i) => `${i + 1}.
 - **Tasks Completed**: ${session.tasksCompleted}
 - **Memories Created**: ${session.memoriesCreated}
 
-### 🤖 AI
-- **Status**: ${client ? "Connected (using OpenCode LLM)" : "Offline mode"}`;
+### 🤖 LLM Configuration
+- **Status**: ${getLLMStatus()}
+- **Config Path**: .opencode/code-buddy/config.json`;
                 }
             }),
 
