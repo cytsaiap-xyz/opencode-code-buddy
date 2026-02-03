@@ -3,9 +3,11 @@
  * 
  * AI Development Assistant Plugin - Project Memory, Knowledge Graph, Smart Task Execution
  * Fully offline capable, persistent storage
+ * Uses OpenCode's built-in LLM for AI-enhanced features
  */
 
 import { tool } from "@opencode-ai/plugin";
+import type { Plugin } from "@opencode-ai/plugin";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -118,8 +120,8 @@ interface SessionState {
 // Main Plugin
 // ============================================
 
-export const CodeBuddyPlugin = async (ctx: { directory: string }) => {
-    const { directory } = ctx;
+export const CodeBuddyPlugin: Plugin = async (ctx) => {
+    const { directory, client } = ctx;
     const storage = new LocalStorage(directory);
 
     // Load data
@@ -175,7 +177,24 @@ export const CodeBuddyPlugin = async (ctx: { directory: string }) => {
         return "medium";
     };
 
-    console.log("[code-buddy] Plugin initialized - Full Version with persistent storage");
+    // AI helper using OpenCode's built-in client
+    const askAI = async (prompt: string): Promise<string> => {
+        if (!client) {
+            return "[AI not available - using offline mode]";
+        }
+        try {
+            // Use OpenCode's current LLM
+            const response = await client.chat({
+                messages: [{ role: "user", content: prompt }]
+            });
+            return response.content || "[No response]";
+        } catch (error) {
+            console.log("[code-buddy] AI error:", error);
+            return "[AI request failed - using offline mode]";
+        }
+    };
+
+    console.log("[code-buddy] Plugin initialized - Full Version with persistent storage and AI integration");
 
     return {
         tool: {
@@ -226,8 +245,15 @@ export const CodeBuddyPlugin = async (ctx: { directory: string }) => {
 | \`buddy_get_workflow_guidance(phase)\` | Phase guidance |
 | \`buddy_get_session_health()\` | Session health |
 
+## 🤖 AI Features
+| Command | Description |
+|---------|-------------|
+| \`buddy_ask_ai(prompt)\` | Ask AI using OpenCode's LLM |
+| \`buddy_analyze_code(code)\` | AI code analysis |
+| \`buddy_suggest_improvements(context)\` | AI improvement suggestions |
+
 ---
-📴 All features work **offline** with persistent storage.`;
+📴 Core features work **offline**. AI features use OpenCode's current LLM.`;
                 }
             }),
 
@@ -353,7 +379,10 @@ ${(steps[taskType as keyof typeof steps] || steps.task).map((s, i) => `${i + 1}.
 
 ### 💚 Session
 - **Tasks Completed**: ${session.tasksCompleted}
-- **Memories Created**: ${session.memoriesCreated}`;
+- **Memories Created**: ${session.memoriesCreated}
+
+### 🤖 AI
+- **Status**: ${client ? "Connected (using OpenCode LLM)" : "Offline mode"}`;
                 }
             }),
 
@@ -596,6 +625,102 @@ ${(steps[args.phase] || steps.idle).join("\n")}`;
 - Productivity: ${bar} ${productivity}%
 
 ${warnings.length > 0 ? `### ⚠️ Warnings\n${warnings.join("\n")}` : ""}`;
+                }
+            }),
+
+            // ========================================
+            // AI FEATURES (Using OpenCode's LLM)
+            // ========================================
+            buddy_ask_ai: tool({
+                description: "Ask AI using OpenCode's current LLM for any question or analysis",
+                args: {
+                    prompt: tool.schema.string().describe("Question or prompt for the AI")
+                },
+                async execute(args) {
+                    const response = await askAI(args.prompt);
+
+                    // Save to memory
+                    const entry: MemoryEntry = {
+                        id: generateId("ai"),
+                        type: "note",
+                        title: `AI Q: ${args.prompt.substring(0, 40)}...`,
+                        content: `Q: ${args.prompt}\n\nA: ${response}`,
+                        tags: ["ai-query"],
+                        timestamp: Date.now()
+                    };
+                    memories.push(entry);
+                    saveMemories();
+
+                    return `## 🤖 AI Response
+
+### Question
+${args.prompt}
+
+### Answer
+${response}
+
+💾 Saved to memory.`;
+                }
+            }),
+
+            buddy_analyze_code: tool({
+                description: "Use AI to analyze code and provide insights",
+                args: {
+                    code: tool.schema.string().describe("Code to analyze"),
+                    focus: tool.schema.string().optional().describe("Focus area: bugs, performance, security, readability, or general")
+                },
+                async execute(args) {
+                    const focus = args.focus || "general";
+                    const prompt = `Analyze the following code with focus on ${focus}:
+
+\`\`\`
+${args.code}
+\`\`\`
+
+Provide:
+1. Summary
+2. Issues found
+3. Suggestions for improvement`;
+
+                    const response = await askAI(prompt);
+
+                    return `## 🔍 Code Analysis (${focus})
+
+${response}`;
+                }
+            }),
+
+            buddy_suggest_improvements: tool({
+                description: "Use AI to suggest improvements for current context",
+                args: {
+                    context: tool.schema.string().describe("Current context or problem description"),
+                    type: tool.schema.string().optional().describe("Type: code, architecture, workflow, documentation")
+                },
+                async execute(args) {
+                    const type = args.type || "general";
+
+                    // Include relevant memories for context
+                    const relevantMemories = searchText(memories, args.context, ["title", "content"]).slice(0, 3);
+                    const memoryContext = relevantMemories.length > 0
+                        ? `\n\nRelevant past decisions:\n${relevantMemories.map(m => `- ${m.title}: ${m.content.substring(0, 100)}`).join("\n")}`
+                        : "";
+
+                    const prompt = `Based on this context, suggest improvements for ${type}:
+
+${args.context}
+${memoryContext}
+
+Provide actionable, specific suggestions.`;
+
+                    const response = await askAI(prompt);
+
+                    return `## 💡 Improvement Suggestions (${type})
+
+### Context
+${args.context}
+
+### Suggestions
+${response}`;
                 }
             })
         }
