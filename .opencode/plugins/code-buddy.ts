@@ -308,6 +308,141 @@ Note: This is a buddy_ask_ai tool call. Please provide a helpful response based 
         return "Using OpenCode's built-in AI";
     };
 
+    // ============================================
+    // Memory Deduplication & Merge
+    // ============================================
+
+    // Simple text similarity using Jaccard index
+    const calculateSimilarity = (text1: string, text2: string): number => {
+        const getWords = (text: string) => new Set(
+            text.toLowerCase()
+                .replace(/[^\w\s]/g, '')
+                .split(/\s+/)
+                .filter(w => w.length > 2)
+        );
+        
+        const words1 = getWords(text1);
+        const words2 = getWords(text2);
+        
+        if (words1.size === 0 || words2.size === 0) return 0;
+        
+        let intersection = 0;
+        for (const word of words1) {
+            if (words2.has(word)) intersection++;
+        }
+        
+        const union = words1.size + words2.size - intersection;
+        return union > 0 ? intersection / union : 0;
+    };
+
+    // Find similar memories
+    const findSimilarMemories = (content: string, title: string, threshold: number = 0.4): MemoryEntry[] => {
+        const combined = `${title} ${content}`;
+        return memories.filter(m => {
+            const memCombined = `${m.title} ${m.content}`;
+            const similarity = calculateSimilarity(combined, memCombined);
+            return similarity >= threshold;
+        });
+    };
+
+    // Merge memories using LLM
+    const mergeMemoriesWithAI = async (existing: MemoryEntry, newContent: { title: string; content: string }): Promise<{ title: string; content: string } | null> => {
+        const prompt = `You are a memory consolidation assistant. Merge these two related memories into one concise, comprehensive entry.
+
+EXISTING MEMORY:
+Title: ${existing.title}
+Content: ${existing.content}
+
+NEW MEMORY:
+Title: ${newContent.title}
+Content: ${newContent.content}
+
+Respond in JSON format only:
+{
+  "title": "merged title (max 60 chars)",
+  "content": "merged content (combine key points, remove duplicates)"
+}`;
+
+        try {
+            const response = await askAI(prompt);
+            
+            // Try to parse JSON from response
+            const jsonMatch = response.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                const parsed = JSON.parse(jsonMatch[0]);
+                if (parsed.title && parsed.content) {
+                    return parsed;
+                }
+            }
+        } catch (error) {
+            console.log("[code-buddy] Merge error:", error);
+        }
+        
+        // Fallback: Simple concatenation
+        return {
+            title: newContent.title,
+            content: `${existing.content}\n\n---\n[Updated] ${newContent.content}`
+        };
+    };
+
+    // Add memory with deduplication
+    const addMemoryWithDedup = async (entry: Omit<MemoryEntry, 'id' | 'timestamp'>, forceSave: boolean = false): Promise<{
+        action: 'created' | 'merged' | 'skipped';
+        entry?: MemoryEntry;
+        similarMemories?: MemoryEntry[];
+        message: string;
+    }> => {
+        // Find similar memories
+        const similar = findSimilarMemories(entry.content, entry.title);
+        
+        if (similar.length === 0 || forceSave) {
+            // No duplicates, save new entry
+            const newEntry: MemoryEntry = {
+                ...entry,
+                id: generateId("mem"),
+                timestamp: Date.now()
+            };
+            memories.push(newEntry);
+            saveMemories();
+            session.memoriesCreated++;
+            return {
+                action: 'created',
+                entry: newEntry,
+                message: `✅ Memory created: **${entry.title}**`
+            };
+        }
+
+        // Found similar memories
+        if (similar.length === 1 && config.llm.enabled && config.llm.apiKey) {
+            // Try to merge with LLM
+            const merged = await mergeMemoriesWithAI(similar[0], { title: entry.title, content: entry.content });
+            if (merged) {
+                // Update existing memory
+                const existingIndex = memories.findIndex(m => m.id === similar[0].id);
+                if (existingIndex >= 0) {
+                    memories[existingIndex].title = merged.title;
+                    memories[existingIndex].content = merged.content;
+                    memories[existingIndex].timestamp = Date.now();
+                    memories[existingIndex].tags = [...new Set([...memories[existingIndex].tags, ...entry.tags])];
+                    saveMemories();
+                    return {
+                        action: 'merged',
+                        entry: memories[existingIndex],
+                        similarMemories: similar,
+                        message: `🔄 Memory merged with existing: **${merged.title}**`
+                    };
+                }
+            }
+        }
+
+        // Return similar memories for user decision
+        return {
+            action: 'skipped',
+            similarMemories: similar,
+            message: `⚠️ Found ${similar.length} similar memor${similar.length === 1 ? 'y' : 'ies'}. Use \`forceSave: true\` to save anyway.`
+        };
+    };
+
     console.log(`[code-buddy] Plugin initialized - LLM: ${getLLMStatus()}`);
 
 
@@ -439,7 +574,7 @@ Note: This is a buddy_ask_ai tool call. Please provide a helpful response based 
             // TASK EXECUTION
             // ========================================
             buddy_do: tool({
-                description: "Execute a development task with automatic analysis and recording",
+                description: "Execute a development task with automatic analysis and recording (with deduplication)",
                 args: {
                     task: tool.schema.string().describe("Task description")
                 },
@@ -447,20 +582,15 @@ Note: This is a buddy_ask_ai tool call. Please provide a helpful response based 
                     const taskType = detectTaskType(args.task);
                     const complexity = estimateComplexity(args.task);
 
-                    const entry: MemoryEntry = {
-                        id: generateId("task"),
+                    // Use deduplication for task recording
+                    const result = await addMemoryWithDedup({
                         type: "feature",
                         title: `Task: ${args.task.substring(0, 50)}...`,
                         content: args.task,
-                        tags: ["buddy-do", taskType, complexity],
-                        timestamp: Date.now()
-                    };
-
-                    memories.push(entry);
-                    saveMemories();
+                        tags: ["buddy-do", taskType, complexity]
+                    }, false); // Don't force save - check for duplicates
 
                     session.tasksCompleted++;
-                    session.memoriesCreated++;
                     session.lastActivity = Date.now();
 
                     const steps = {
@@ -473,17 +603,26 @@ Note: This is a buddy_ask_ai tool call. Please provide a helpful response based 
                         task: ["Clarify goals", "Plan approach", "Execute", "Verify", "Document"]
                     };
 
+                    let statusMsg = "";
+                    if (result.action === 'created') {
+                        statusMsg = `💾 New task saved (ID: ${result.entry?.id})`;
+                    } else if (result.action === 'merged') {
+                        statusMsg = `🔄 Merged with existing similar task`;
+                    } else {
+                        statusMsg = `⚠️ Similar task exists - not saved (use buddy_add_memory with forceSave to save)`;
+                    }
+
                     return `## 🎯 Task Recorded
 
 **Task**: ${args.task}
-**ID**: ${entry.id}
 **Type**: ${taskType}
 **Complexity**: ${complexity}
+**Status**: ${statusMsg}
 
 ### 📋 Suggested Steps
 ${(steps[taskType as keyof typeof steps] || steps.task).map((s, i) => `${i + 1}. ${s}`).join("\n")}
 
-💾 Saved to memory. Use \`buddy_remember\` to recall later.`;
+Use \`buddy_remember\` to recall later.`;
                 }
             }),
 
@@ -566,26 +705,39 @@ ${(steps[taskType as keyof typeof steps] || steps.task).map((s, i) => `${i + 1}.
             }),
 
             buddy_add_memory: tool({
-                description: "Add a memory entry",
+                description: "Add a memory entry with automatic deduplication. If similar memory exists, will try to merge or ask to confirm",
                 args: {
                     title: tool.schema.string().describe("Memory title"),
                     content: tool.schema.string().describe("Memory content"),
                     type: tool.schema.string().describe("Type: decision, pattern, bugfix, lesson, feature, note"),
-                    tags: tool.schema.array(tool.schema.string()).optional().describe("Tags")
+                    tags: tool.schema.array(tool.schema.string()).optional().describe("Tags"),
+                    forceSave: tool.schema.boolean().optional().describe("Set true to save even if similar memory exists")
                 },
                 async execute(args) {
-                    const entry: MemoryEntry = {
-                        id: generateId("mem"),
+                    const result = await addMemoryWithDedup({
                         type: args.type as MemoryType,
                         title: args.title,
                         content: args.content,
-                        tags: args.tags || [],
-                        timestamp: Date.now()
-                    };
-                    memories.push(entry);
-                    saveMemories();
-                    session.memoriesCreated++;
-                    return `✅ Memory added: **${args.title}**\n\nID: ${entry.id}\nType: ${args.type}`;
+                        tags: args.tags || []
+                    }, args.forceSave || false);
+
+                    if (result.action === 'created') {
+                        return `${result.message}\n\nID: ${result.entry?.id}\nType: ${args.type}`;
+                    }
+                    
+                    if (result.action === 'merged') {
+                        return `${result.message}\n\n### Merged with:\n- ${result.similarMemories?.[0]?.title}\n\nID: ${result.entry?.id}`;
+                    }
+                    
+                    // Skipped - found similar
+                    let output = `${result.message}\n\n### Similar Memories Found\n\n`;
+                    for (const sim of result.similarMemories || []) {
+                        output += `#### ${sim.title}\n`;
+                        output += `- ID: \`${sim.id}\`\n`;
+                        output += `- Content: ${sim.content.substring(0, 100)}...\n\n`;
+                    }
+                    output += `\n---\nTo save anyway, call:\n\`buddy_add_memory(title: "${args.title}", content: "...", type: "${args.type}", forceSave: true)\``;
+                    return output;
                 }
             }),
 
