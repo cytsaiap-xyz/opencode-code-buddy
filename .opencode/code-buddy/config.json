@@ -17,5 +17,11 @@
         "errorLearning": true,
         "workflow": true,
         "ai": true
+    },
+    "hooks": {
+        "autoRemind": true,
+        "protectEnv": true,
+        "trackFiles": false,
+        "compactionContext": true
     }
 }

@@ -154,6 +154,12 @@ interface PluginConfig {
         workflow: boolean;
         ai: boolean;
     };
+    hooks: {
+        autoRemind: boolean;
+        protectEnv: boolean;
+        trackFiles: boolean;
+        compactionContext: boolean;
+    };
 }
 
 const defaultConfig: PluginConfig = {
@@ -175,6 +181,12 @@ const defaultConfig: PluginConfig = {
         errorLearning: true,
         workflow: true,
         ai: true
+    },
+    hooks: {
+        autoRemind: true,        // session.idle - 任務完成提醒
+        protectEnv: true,        // tool.execute.before - 保護 .env
+        trackFiles: false,       // file.edited - 追蹤檔案 (預設關)
+        compactionContext: true  // session.compacting - 壓縮時保留記憶
     }
 };
 
@@ -1438,6 +1450,85 @@ ${args.context}
 ${response}`;
                 }
             })
+        },
+
+        // ========================================
+        // EVENT HOOKS
+        // ========================================
+
+        // Hook: session.idle - 任務完成時提醒
+        event: async ({ event }: { event: { type: string; data?: unknown } }) => {
+            if (config.hooks.autoRemind && event.type === "session.idle") {
+                // 記錄 session 活動
+                session.lastActivity = Date.now();
+                
+                // 如果這個 session 有任務完成，提醒使用者
+                if (session.tasksCompleted > 0) {
+                    console.log(`[code-buddy] 💡 Reminder: ${session.tasksCompleted} task(s) completed. Use buddy_done to record results.`);
+                }
+            }
+        },
+
+        // Hook: tool.execute.before - 工具執行前攔截
+        "tool.execute.before": async (input: { tool: string }, output: { args: { filePath?: string } }) => {
+            if (config.hooks.protectEnv) {
+                const filePath = output.args?.filePath || "";
+                const protectedPatterns = [".env", ".env.local", ".env.production", "secrets"];
+                
+                for (const pattern of protectedPatterns) {
+                    if (filePath.includes(pattern)) {
+                        console.log(`[code-buddy] ⚠️ Protected file access blocked: ${filePath}`);
+                        throw new Error(`[Code Buddy] Access to protected file "${filePath}" is blocked. Add to config.hooks.protectEnv = false to disable.`);
+                    }
+                }
+            }
+        },
+
+        // Hook: file.edited - 檔案編輯追蹤
+        "file.edited": async (input: { path: string }) => {
+            if (config.hooks.trackFiles && input.path) {
+                // 過濾掉一些常見的不需要追蹤的檔案
+                const ignoredPatterns = ["node_modules", ".git", "dist", "build", ".next", "package-lock"];
+                const shouldTrack = !ignoredPatterns.some(p => input.path.includes(p));
+                
+                if (shouldTrack) {
+                    // 記錄到記憶中
+                    await addMemoryWithDedup({
+                        type: "feature",
+                        category: "knowledge",
+                        title: `File edited: ${input.path.split('/').pop()}`,
+                        content: `Edited file: ${input.path}`,
+                        tags: ["auto-tracked", "file-edit"]
+                    }, false);
+                    console.log(`[code-buddy] 📝 Tracked file edit: ${input.path}`);
+                }
+            }
+        },
+
+        // Hook: session.compacting - 壓縮時注入記憶
+        "experimental.session.compacting": async (_input: unknown, output: { context: string[] }) => {
+            if (config.hooks.compactionContext) {
+                // 取得最近的記憶
+                const recentMemories = [...memories]
+                    .sort((a, b) => b.timestamp - a.timestamp)
+                    .slice(0, 5);
+                
+                if (recentMemories.length > 0) {
+                    const memoryContext = recentMemories
+                        .map(m => `- [${m.type}] ${m.title}`)
+                        .join('\n');
+                    
+                    output.context.push(`## Code Buddy Memory Context
+
+Recent project memories that should persist:
+
+${memoryContext}
+
+Use \`buddy_remember\` to recall more details if needed.`);
+                    
+                    console.log(`[code-buddy] 📦 Injected ${recentMemories.length} memories into compaction context`);
+                }
+            }
         }
     };
 };
