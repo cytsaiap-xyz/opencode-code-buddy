@@ -671,21 +671,24 @@ Respond in JSON format only:
             // TASK EXECUTION
             // ========================================
             buddy_do: tool({
-                description: "Execute a development task with automatic analysis and recording (with deduplication)",
+                description: "Execute a development task - analyzes, records, and optionally executes the task using AI",
                 args: {
-                    task: tool.schema.string().describe("Task description")
+                    task: tool.schema.string().describe("Task description"),
+                    execute: tool.schema.boolean().optional().describe("Set true to execute the task using AI (default: true)"),
+                    context: tool.schema.string().optional().describe("Additional context (code, file paths, etc.)")
                 },
                 async execute(args) {
                     const taskType = detectTaskType(args.task);
                     const complexity = estimateComplexity(args.task);
+                    const shouldExecute = args.execute !== false; // Default to true
 
                     // Use deduplication for task recording
-                    const result = await addMemoryWithDedup({
-                        type: "feature",
+                    const dedupResult = await addMemoryWithDedup({
+                        type: taskType === "fix" ? "bugfix" : "feature",
                         title: `Task: ${args.task.substring(0, 50)}...`,
-                        content: args.task,
+                        content: args.task + (args.context ? `\n\nContext: ${args.context}` : ''),
                         tags: ["buddy-do", taskType, complexity]
-                    }, false); // Don't force save - check for duplicates
+                    }, false);
 
                     session.tasksCompleted++;
                     session.lastActivity = Date.now();
@@ -701,25 +704,55 @@ Respond in JSON format only:
                     };
 
                     let statusMsg = "";
-                    if (result.action === 'created') {
-                        statusMsg = `💾 New task saved (ID: ${result.entry?.id})`;
-                    } else if (result.action === 'merged') {
-                        statusMsg = `🔄 Merged with existing similar task`;
+                    if (dedupResult.action === 'created') {
+                        statusMsg = `💾 Task saved (ID: ${dedupResult.entry?.id})`;
+                    } else if (dedupResult.action === 'merged') {
+                        statusMsg = `🔄 Merged with existing task`;
                     } else {
-                        statusMsg = `⚠️ Similar task exists - not saved (use buddy_add_memory with forceSave to save)`;
+                        statusMsg = `⚠️ Similar task exists`;
                     }
 
-                    return `## 🎯 Task Recorded
+                    let output = `## 🎯 Task: ${args.task}
 
-**Task**: ${args.task}
-**Type**: ${taskType}
-**Complexity**: ${complexity}
+**Type**: ${taskType} | **Complexity**: ${complexity}
 **Status**: ${statusMsg}
 
-### 📋 Suggested Steps
+`;
+
+                    // Execute task using AI if enabled
+                    if (shouldExecute) {
+                        const executionPrompt = `You are a development assistant. Execute the following task and provide results.
+
+TASK: ${args.task}
+
+${args.context ? `CONTEXT:\n${args.context}\n` : ''}
+
+TASK TYPE: ${taskType}
+COMPLEXITY: ${complexity}
+
+Please provide:
+1. **Analysis**: Brief understanding of the task
+2. **Solution**: The actual implementation or answer
+3. **Next Steps**: What the user should do next
+
+Be concise but thorough. If this involves code, provide the actual code.`;
+
+                        const aiResponse = await askAI(executionPrompt);
+                        
+                        output += `### 🤖 AI Execution Result
+
+${aiResponse}
+
+---
+`;
+                    }
+
+                    output += `### 📋 Recommended Steps
 ${(steps[taskType as keyof typeof steps] || steps.task).map((s, i) => `${i + 1}. ${s}`).join("\n")}
 
-Use \`buddy_remember\` to recall later.`;
+> Use \`buddy_remember("${args.task.split(' ').slice(0, 3).join(' ')}")\` to recall this task later.`;
+
+                    return output;
                 }
             }),
 
