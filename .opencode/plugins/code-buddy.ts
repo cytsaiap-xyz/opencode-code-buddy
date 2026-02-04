@@ -60,6 +60,7 @@ class LocalStorage {
 // ============================================
 
 type MemoryType = "decision" | "pattern" | "bugfix" | "lesson" | "feature" | "note";
+type MemoryCategory = "solution" | "knowledge";
 type EntityType = "decision" | "feature" | "component" | "file" | "bug_fix" | "lesson" | "pattern" | "technology";
 type ErrorType = "procedure-violation" | "workflow-skip" | "assumption-error" | "validation-skip" |
     "responsibility-lack" | "firefighting" | "dependency-miss" | "integration-error" |
@@ -67,9 +68,20 @@ type ErrorType = "procedure-violation" | "workflow-skip" | "assumption-error" | 
 type WorkflowPhase = "idle" | "planning" | "implementing" | "code-written" | "testing" |
     "test-complete" | "reviewing" | "commit-ready" | "committed" | "deploying" | "completed";
 
+// Memory type to category mapping
+const MEMORY_TYPE_CATEGORY: Record<MemoryType, MemoryCategory> = {
+    decision: "solution",
+    bugfix: "solution",
+    lesson: "solution",
+    pattern: "knowledge",
+    feature: "knowledge",
+    note: "knowledge"
+};
+
 interface MemoryEntry {
     id: string;
     type: MemoryType;
+    category?: MemoryCategory;  // Auto-derived from type if not set
     title: string;
     content: string;
     tags: string[];
@@ -240,6 +252,15 @@ export const CodeBuddyPlugin: Plugin = async (ctx) => {
             })
         );
     };
+
+    // Get category for a memory (from field or derived from type)
+    const getMemoryCategory = (memory: MemoryEntry): MemoryCategory => {
+        return memory.category || MEMORY_TYPE_CATEGORY[memory.type] || "knowledge";
+    };
+
+    // Category-based filters
+    const getSolutionMemories = () => memories.filter(m => getMemoryCategory(m) === "solution");
+    const getKnowledgeMemories = () => memories.filter(m => getMemoryCategory(m) === "knowledge");
 
     const detectTaskType = (task: string) => {
         const lower = task.toLowerCase();
@@ -743,9 +764,56 @@ Use \`buddy_remember\` to recall later.`;
                     }
                     let msg = `## 📜 Recent Memories (${recent.length})\n\n`;
                     for (const m of recent) {
-                        msg += `- **${m.title}** (${m.type}) - ${new Date(m.timestamp).toLocaleDateString()}\n`;
+                        const cat = getMemoryCategory(m);
+                        msg += `- **${m.title}** (${m.type}/${cat}) - ${new Date(m.timestamp).toLocaleDateString()}\n`;
                     }
                     return msg;
+                }
+            }),
+
+            buddy_remember_by_category: tool({
+                description: "Get memories filtered by category (solution or knowledge)",
+                args: {
+                    category: tool.schema.string().describe("Category: 'solution' (decision, bugfix, lesson) or 'knowledge' (pattern, feature, note)"),
+                    limit: tool.schema.number().optional().describe("Number of results (default: 10)"),
+                    query: tool.schema.string().optional().describe("Optional search query within category")
+                },
+                async execute(args) {
+                    const cat = args.category.toLowerCase() as MemoryCategory;
+                    if (!['solution', 'knowledge'].includes(cat)) {
+                        return `❌ Invalid category: "${args.category}". Use 'solution' or 'knowledge'.`;
+                    }
+
+                    let filtered = cat === 'solution' ? getSolutionMemories() : getKnowledgeMemories();
+                    
+                    // Apply search query if provided
+                    if (args.query) {
+                        filtered = searchText(filtered, args.query, ["title", "content", "tags"]);
+                    }
+
+                    // Sort by most recent and limit
+                    filtered = filtered
+                        .sort((a, b) => b.timestamp - a.timestamp)
+                        .slice(0, args.limit || 10);
+
+                    if (filtered.length === 0) {
+                        return `📂 No ${cat} memories found${args.query ? ` matching "${args.query}"` : ''}.`;
+                    }
+
+                    const typeLabels = cat === 'solution' 
+                        ? '(decision, bugfix, lesson)'
+                        : '(pattern, feature, note)';
+
+                    let output = `## 📂 ${cat.charAt(0).toUpperCase() + cat.slice(1)} Memories ${typeLabels}\n\n`;
+                    output += `**Found**: ${filtered.length} item(s)\n\n`;
+                    
+                    for (const m of filtered) {
+                        output += `### ${m.title}\n`;
+                        output += `- **Type**: ${m.type} | **ID**: \`${m.id}\`\n`;
+                        output += `- **Date**: ${new Date(m.timestamp).toLocaleString()}\n`;
+                        output += `- **Content**: ${m.content.substring(0, 150)}${m.content.length > 150 ? '...' : ''}\n\n`;
+                    }
+                    return output;
                 }
             }),
 
@@ -757,10 +825,17 @@ Use \`buddy_remember\` to recall later.`;
                     for (const m of memories) {
                         byType[m.type] = (byType[m.type] || 0) + 1;
                     }
+                    
+                    const solutionCount = getSolutionMemories().length;
+                    const knowledgeCount = getKnowledgeMemories().length;
+                    
                     return `## 📊 Statistics
 
 ### 🧠 Memories
 - **Total**: ${memories.length}
+- **By Category**:
+  - 🔧 Solution: ${solutionCount} (decision, bugfix, lesson)
+  - 📚 Knowledge: ${knowledgeCount} (pattern, feature, note)
 - **By Type**: ${Object.entries(byType).map(([t, c]) => `${t}(${c})`).join(", ") || "none"}
 
 ### 🔗 Knowledge Graph
