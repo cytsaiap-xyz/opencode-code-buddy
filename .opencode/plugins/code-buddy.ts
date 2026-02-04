@@ -335,14 +335,86 @@ Note: This is a buddy_ask_ai tool call. Please provide a helpful response based 
         return union > 0 ? intersection / union : 0;
     };
 
-    // Find similar memories
-    const findSimilarMemories = (content: string, title: string, threshold: number = 0.4): MemoryEntry[] => {
+    // Check semantic similarity using LLM
+    const checkSemanticSimilarity = async (text1: string, text2: string): Promise<{ similar: boolean; score: number; reason: string }> => {
+        if (!config.llm.enabled || !config.llm.apiKey) {
+            return { similar: false, score: 0, reason: "LLM not configured" };
+        }
+
+        const prompt = `Compare these two texts and determine if they are semantically similar (same topic/meaning).
+
+TEXT 1:
+${text1.substring(0, 500)}
+
+TEXT 2:
+${text2.substring(0, 500)}
+
+Respond in JSON only:
+{
+  "similar": true/false,
+  "score": 0.0-1.0,
+  "reason": "brief explanation"
+}`;
+
+        try {
+            const response = await askAI(prompt);
+            const jsonMatch = response.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                const parsed = JSON.parse(jsonMatch[0]);
+                return {
+                    similar: parsed.similar === true,
+                    score: typeof parsed.score === 'number' ? parsed.score : 0,
+                    reason: parsed.reason || ""
+                };
+            }
+        } catch (error) {
+            console.log("[code-buddy] Semantic similarity error:", error);
+        }
+        return { similar: false, score: 0, reason: "Parse error" };
+    };
+
+    // Find similar memories (Jaccard + optional LLM)
+    const findSimilarMemories = async (content: string, title: string, useLLM: boolean = true): Promise<{
+        matches: MemoryEntry[];
+        method: "jaccard" | "llm" | "both";
+    }> => {
         const combined = `${title} ${content}`;
-        return memories.filter(m => {
+        const jaccardThreshold = 0.35;
+        const llmThreshold = 0.6;
+
+        // First pass: Jaccard similarity
+        const jaccardMatches = memories.filter(m => {
             const memCombined = `${m.title} ${m.content}`;
             const similarity = calculateSimilarity(combined, memCombined);
-            return similarity >= threshold;
+            return similarity >= jaccardThreshold;
         });
+
+        // If Jaccard finds matches, return them
+        if (jaccardMatches.length > 0) {
+            return { matches: jaccardMatches, method: "jaccard" };
+        }
+
+        // If LLM is enabled and requested, check semantic similarity
+        if (useLLM && config.llm.enabled && config.llm.apiKey && memories.length > 0) {
+            // Check top candidates (most recent memories of same type or similar tags)
+            const candidates = memories.slice(-10); // Check last 10 memories
+            const llmMatches: MemoryEntry[] = [];
+
+            for (const m of candidates) {
+                const memCombined = `${m.title} ${m.content}`;
+                const result = await checkSemanticSimilarity(combined, memCombined);
+                if (result.similar && result.score >= llmThreshold) {
+                    llmMatches.push(m);
+                    console.log(`[code-buddy] LLM found similar: ${m.title} (${result.score}, ${result.reason})`);
+                }
+            }
+
+            if (llmMatches.length > 0) {
+                return { matches: llmMatches, method: "llm" };
+            }
+        }
+
+        return { matches: [], method: jaccardMatches.length > 0 ? "jaccard" : "llm" };
     };
 
     // Merge memories using LLM
@@ -390,10 +462,12 @@ Respond in JSON format only:
         action: 'created' | 'merged' | 'skipped';
         entry?: MemoryEntry;
         similarMemories?: MemoryEntry[];
+        method?: string;
         message: string;
     }> => {
-        // Find similar memories
-        const similar = findSimilarMemories(entry.content, entry.title);
+        // Find similar memories (using both Jaccard and LLM)
+        const similarResult = await findSimilarMemories(entry.content, entry.title, !forceSave);
+        const similar = similarResult.matches;
         
         if (similar.length === 0 || forceSave) {
             // No duplicates, save new entry
@@ -429,7 +503,8 @@ Respond in JSON format only:
                         action: 'merged',
                         entry: memories[existingIndex],
                         similarMemories: similar,
-                        message: `🔄 Memory merged with existing: **${merged.title}**`
+                        method: similarResult.method,
+                        message: `🔄 Memory merged with existing (${similarResult.method}): **${merged.title}**`
                     };
                 }
             }
@@ -439,7 +514,8 @@ Respond in JSON format only:
         return {
             action: 'skipped',
             similarMemories: similar,
-            message: `⚠️ Found ${similar.length} similar memor${similar.length === 1 ? 'y' : 'ies'}. Use \`forceSave: true\` to save anyway.`
+            method: similarResult.method,
+            message: `⚠️ Found ${similar.length} similar memor${similar.length === 1 ? 'y' : 'ies'} (via ${similarResult.method}). Use \`forceSave: true\` to save anyway.`
         };
     };
 
