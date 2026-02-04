@@ -18,14 +18,44 @@ Code Buddy 的記憶系統是一個基於本地 JSON 檔案的持久化儲存系
 
 ## 記憶類型 (Memory Types)
 
-| 類型       | 說明     | 用途                       |
-| ---------- | -------- | -------------------------- |
-| `decision` | 決策記錄 | 記錄為什麼選擇某個方案     |
-| `pattern`  | 模式     | 常用的程式碼模式或解決方案 |
-| `bugfix`   | Bug 修復 | 如何修復特定問題           |
-| `lesson`   | 教訓     | 從錯誤中學到的經驗         |
-| `feature`  | 功能     | 實現的功能描述             |
-| `note`     | 筆記     | 一般性筆記                 |
+### 分類系統
+
+記憶分為兩大類別：
+
+| 類別            | 英文        | 包含類型                 | 用途         |
+| --------------- | ----------- | ------------------------ | ------------ |
+| 🔧 **解決方案** | `solution`  | decision, bugfix, lesson | 解決問題導向 |
+| 📚 **知識累積** | `knowledge` | pattern, feature, note   | 知識累積導向 |
+
+### 類型明細
+
+| 類型       | 類別      | 說明     | 用途                       |
+| ---------- | --------- | -------- | -------------------------- |
+| `decision` | solution  | 決策記錄 | 記錄為什麼選擇某個方案     |
+| `bugfix`   | solution  | Bug 修復 | 如何修復特定問題           |
+| `lesson`   | solution  | 教訓     | 從錯誤中學到的經驗         |
+| `pattern`  | knowledge | 模式     | 常用的程式碼模式或解決方案 |
+| `feature`  | knowledge | 功能     | 實現的功能描述             |
+| `note`     | knowledge | 筆記     | 一般性筆記                 |
+
+### 類別自動推導
+
+```typescript
+// 類型到類別的映射
+const MEMORY_TYPE_CATEGORY: Record<MemoryType, MemoryCategory> = {
+  decision: "solution",
+  bugfix: "solution",
+  lesson: "solution",
+  pattern: "knowledge",
+  feature: "knowledge",
+  note: "knowledge",
+};
+
+// 取得記憶的類別
+const getMemoryCategory = (memory: MemoryEntry): MemoryCategory => {
+  return memory.category || MEMORY_TYPE_CATEGORY[memory.type] || "knowledge";
+};
+```
 
 ---
 
@@ -37,11 +67,14 @@ Code Buddy 的記憶系統是一個基於本地 JSON 檔案的持久化儲存系
 interface MemoryEntry {
   id: string; // 唯一識別碼 (格式: {prefix}_{timestamp}_{random})
   type: MemoryType; // 記憶類型
+  category?: MemoryCategory; // 類別 (自動從 type 推導)
   title: string; // 標題
   content: string; // 內容
   tags: string[]; // 標籤
   timestamp: number; // Unix 時間戳
 }
+
+type MemoryCategory = "solution" | "knowledge";
 ```
 
 ### Entity (知識圖譜實體)
