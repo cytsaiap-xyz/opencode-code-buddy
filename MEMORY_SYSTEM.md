@@ -194,9 +194,182 @@ const searchText = (items, query, fields) => {
 ## 注意事項
 
 1. **持久化**: 所有資料即時寫入 JSON 檔案，不會因 Session 結束而遺失
-2. **無刪除功能**: 目前沒有刪除記憶的 API（可手動編輯 JSON）
-3. **無容量限制**: JSON 會持續增長，需要手動管理
+2. **有刪除功能**: 使用 `buddy_delete_memory` 刪除（雙重確認機制）
+3. **自動去重**: 新增記憶前會檢查相似度，避免重複
 4. **Session 統計**: `tasksCompleted`, `memoriesCreated` 等只在 Session 內有效
+
+---
+
+## 記憶去重機制
+
+### 雙層相似度檢測
+
+```
+新記憶輸入
+    ↓
+第一層: Jaccard 相似度 (≥35%)
+    ↓ 找到 → 標記重複
+    ↓ 沒找到
+第二層: LLM 語義相似度 (≥60%)
+    ↓ 找到 → 標記重複
+    ↓ 沒找到
+儲存新記憶
+```
+
+| 層級 | 方法          | 閾值 | 說明                       |
+| ---- | ------------- | ---- | -------------------------- |
+| 1    | Jaccard Index | 35%  | 快速文字比對（詞彙重疊度） |
+| 2    | LLM 語義分析  | 60%  | 檢查最近 10 筆記憶的語義   |
+
+### Jaccard 相似度算法
+
+```typescript
+const calculateSimilarity = (text1: string, text2: string): number => {
+  const getWords = (text: string) =>
+    new Set(
+      text
+        .toLowerCase()
+        .replace(/[^\w\s]/g, "")
+        .split(/\s+/)
+        .filter((w) => w.length > 2),
+    );
+
+  const words1 = getWords(text1);
+  const words2 = getWords(text2);
+
+  // Jaccard Index = 交集 / 聯集
+  let intersection = 0;
+  for (const word of words1) {
+    if (words2.has(word)) intersection++;
+  }
+  const union = words1.size + words2.size - intersection;
+  return union > 0 ? intersection / union : 0;
+};
+```
+
+### LLM 語義相似度
+
+當 Jaccard 檢測未發現相似記憶，且已設定 LLM API 時：
+
+```typescript
+const checkSemanticSimilarity = async (
+  text1,
+  text2,
+): Promise<{
+  similar: boolean; // 是否相似
+  score: number; // 0.0-1.0 相似分數
+  reason: string; // 判斷原因
+}> => {
+  // 使用 LLM 判斷語義相似度
+  const prompt = `Compare these two texts...`;
+  const response = await askAI(prompt);
+  return JSON.parse(response);
+};
+```
+
+### 去重後的行為
+
+| 情況                   | 行為                         |
+| ---------------------- | ---------------------------- |
+| 無相似記憶             | 直接儲存                     |
+| 1 個相似 + LLM 已設定  | 自動合併（LLM 整合內容）     |
+| 1 個相似 + 無 LLM      | 提示使用者確認               |
+| 多個相似               | 提示使用者確認，顯示相似列表 |
+| 使用 `forceSave: true` | 強制儲存，忽略去重           |
+
+---
+
+## 記憶刪除機制
+
+### 雙重確認流程
+
+```
+Step 1: 選擇要刪除的記憶
+    ↓
+顯示將刪除的項目清單 + 內容預覽
+    ↓
+產生 6 位確認碼（有效期 5 分鐘）
+    ↓
+Step 2: 輸入確認碼
+    ↓
+執行刪除
+```
+
+### 使用方式
+
+```bash
+# Step 1: 選擇 (三種方式)
+buddy_delete_memory(query: "JWT")        # 搜尋關鍵字
+buddy_delete_memory(id: "mem_123...")    # 指定 ID
+buddy_delete_memory(type: "decision")    # 按類型
+
+# Step 2: 確認
+buddy_delete_memory(confirmCode: "ABC123")
+```
+
+### 安全措施
+
+| 措施     | 說明                      |
+| -------- | ------------------------- |
+| 預覽     | 顯示將刪除的項目清單      |
+| 內容摘要 | 顯示前 3 項的內容預覽     |
+| 確認碼   | 需輸入隨機產生的 6 字元碼 |
+| 過期時間 | 確認碼 5 分鐘後過期       |
+| 取消機制 | 不輸入確認碼即自動取消    |
+
+---
+
+## LLM 設定
+
+### 設定檔位置
+
+```
+.opencode/code-buddy/config.json
+```
+
+### 設定內容
+
+```json
+{
+  "llm": {
+    "enabled": true,
+    "provider": "openai",
+    "baseUrl": "https://api.openai.com/v1",
+    "apiKey": "sk-...",
+    "model": "gpt-4o-mini",
+    "maxTokens": 2048,
+    "temperature": 0.7
+  }
+}
+```
+
+### LLM 功能一覽
+
+| 功能           | 需要 LLM | 說明                      |
+| -------------- | -------- | ------------------------- |
+| 語義相似度檢測 | ✓        | 判斷記憶是否語義相似      |
+| 記憶自動合併   | ✓        | 合併相似記憶為一條        |
+| AI 查詢        | ✓        | `buddy_ask_ai` 等 AI 功能 |
+| Jaccard 去重   | ✗        | 純文字比對，無需 LLM      |
+| 記憶刪除       | ✗        | 刪除功能不需要 LLM        |
+
+---
+
+## 工具對應表 (完整版)
+
+| 工具                           | 資料來源       | 操作      |
+| ------------------------------ | -------------- | --------- |
+| `buddy_remember(query)`        | memory.json    | 搜尋      |
+| `buddy_remember_recent(limit)` | memory.json    | 最近 N 筆 |
+| `buddy_remember_stats()`       | 全部           | 統計      |
+| `buddy_add_memory(...)`        | memory.json    | 新增+去重 |
+| `buddy_delete_memory(...)`     | memory.json    | 刪除      |
+| `buddy_search_entities(query)` | entities.json  | 搜尋      |
+| `buddy_create_entity(...)`     | entities.json  | 新增      |
+| `buddy_create_relation(...)`   | relations.json | 新增      |
+| `buddy_record_mistake(...)`    | mistakes.json  | 新增      |
+| `buddy_get_mistake_patterns()` | mistakes.json  | 分析      |
+| `buddy_config(...)`            | config.json    | 設定      |
 
 ---
 
