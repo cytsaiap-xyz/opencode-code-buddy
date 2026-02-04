@@ -211,8 +211,18 @@ export const CodeBuddyPlugin: Plugin = async (ctx) => {
         currentPhase: "idle"
     };
 
+    // Pending deletion state for two-step confirmation
+    let pendingDeletion: {
+        type: "memory" | "entity" | "relation" | "mistake" | "all";
+        ids: string[];
+        items: any[];
+        timestamp: number;
+        confirmCode: string;
+    } | null = null;
+
     // Helper functions
     const generateId = (prefix: string) => `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    const generateConfirmCode = () => Math.random().toString(36).substring(2, 8).toUpperCase();
 
     const saveMemories = () => storage.write("memory.json", memories);
     const saveEntities = () => storage.write("entities.json", entities);
@@ -576,6 +586,152 @@ ${(steps[taskType as keyof typeof steps] || steps.task).map((s, i) => `${i + 1}.
                     saveMemories();
                     session.memoriesCreated++;
                     return `✅ Memory added: **${args.title}**\n\nID: ${entry.id}\nType: ${args.type}`;
+                }
+            }),
+
+            buddy_delete_memory: tool({
+                description: "Delete memories with two-step confirmation. First call shows what will be deleted, second call with confirmCode executes deletion",
+                args: {
+                    query: tool.schema.string().optional().describe("Search query to find memories to delete"),
+                    id: tool.schema.string().optional().describe("Specific memory ID to delete"),
+                    type: tool.schema.string().optional().describe("Delete all memories of this type"),
+                    confirmCode: tool.schema.string().optional().describe("Confirmation code from step 1 to execute deletion")
+                },
+                async execute(args) {
+                    // Step 2: Execute deletion if confirmCode is provided
+                    if (args.confirmCode) {
+                        if (!pendingDeletion) {
+                            return `❌ No pending deletion found. Please first call buddy_delete_memory with query, id, or type to select memories to delete.`;
+                        }
+                        
+                        // Check confirmation code
+                        if (args.confirmCode !== pendingDeletion.confirmCode) {
+                            return `❌ Invalid confirmation code.\n\nExpected: \`${pendingDeletion.confirmCode}\`\nReceived: \`${args.confirmCode}\`\n\nPlease use the exact code provided.`;
+                        }
+                        
+                        // Check if pending deletion is expired (5 minutes)
+                        if (Date.now() - pendingDeletion.timestamp > 5 * 60 * 1000) {
+                            pendingDeletion = null;
+                            return `❌ Deletion request expired (5 minute timeout). Please start over.`;
+                        }
+                        
+                        // Execute deletion
+                        const deletedCount = pendingDeletion.ids.length;
+                        const deletedItems = pendingDeletion.items;
+                        
+                        if (pendingDeletion.type === "memory") {
+                            memories = memories.filter(m => !pendingDeletion!.ids.includes(m.id));
+                            saveMemories();
+                        } else if (pendingDeletion.type === "entity") {
+                            entities = entities.filter(e => !pendingDeletion!.ids.includes(e.id));
+                            saveEntities();
+                        } else if (pendingDeletion.type === "relation") {
+                            relations = relations.filter(r => !pendingDeletion!.ids.includes(r.id));
+                            saveRelations();
+                        } else if (pendingDeletion.type === "mistake") {
+                            mistakes = mistakes.filter(m => !pendingDeletion!.ids.includes(m.id));
+                            saveMistakes();
+                        }
+                        
+                        pendingDeletion = null;
+                        
+                        return `## ✅ Deletion Complete
+
+**Deleted**: ${deletedCount} item(s)
+
+### Deleted Items
+${deletedItems.map((item: any) => `- ${item.title || item.name || item.action || item.id}`).join("\n")}
+
+⚠️ This action cannot be undone.`;
+                    }
+                    
+                    // Step 1: Find and show items to delete
+                    let itemsToDelete: any[] = [];
+                    let deleteType: "memory" | "entity" | "relation" | "mistake" | "all" = "memory";
+                    
+                    if (args.id) {
+                        // Find by specific ID
+                        const found = memories.find(m => m.id === args.id);
+                        if (found) {
+                            itemsToDelete = [found];
+                        } else {
+                            return `❌ Memory not found with ID: ${args.id}`;
+                        }
+                    } else if (args.type) {
+                        // Find by type
+                        itemsToDelete = memories.filter(m => m.type === args.type);
+                        if (itemsToDelete.length === 0) {
+                            return `❌ No memories found with type: ${args.type}`;
+                        }
+                    } else if (args.query) {
+                        // Search by query
+                        itemsToDelete = searchText(memories, args.query, ["title", "content", "tags"]);
+                        if (itemsToDelete.length === 0) {
+                            return `❌ No memories found matching: "${args.query}"`;
+                        }
+                    } else {
+                        return `❌ Please specify one of: query, id, or type to find memories to delete.`;
+                    }
+                    
+                    // Generate confirmation code
+                    const confirmCode = generateConfirmCode();
+                    
+                    // Store pending deletion
+                    pendingDeletion = {
+                        type: deleteType,
+                        ids: itemsToDelete.map((item: any) => item.id),
+                        items: itemsToDelete,
+                        timestamp: Date.now(),
+                        confirmCode
+                    };
+                    
+                    // Build summary
+                    let summary = `## ⚠️ Deletion Confirmation Required
+
+> **WARNING**: This action cannot be undone!
+
+### Items to be Deleted (${itemsToDelete.length})
+
+| ID | Type | Title | Date |
+|----|------|-------|------|
+`;
+                    for (const item of itemsToDelete.slice(0, 10)) {
+                        const date = new Date(item.timestamp || item.createdAt).toLocaleDateString();
+                        summary += `| \`${item.id.substring(0, 15)}...\` | ${item.type} | ${(item.title || item.name || "").substring(0, 30)} | ${date} |\n`;
+                    }
+                    
+                    if (itemsToDelete.length > 10) {
+                        summary += `\n... and ${itemsToDelete.length - 10} more items\n`;
+                    }
+                    
+                    summary += `
+### Content Preview
+`;
+                    for (const item of itemsToDelete.slice(0, 3)) {
+                        summary += `
+#### ${item.title || item.name}
+\`\`\`
+${(item.content || item.observations?.join("\n") || "").substring(0, 200)}...
+\`\`\`
+`;
+                    }
+                    
+                    summary += `
+---
+
+## 🔐 To Confirm Deletion
+
+Call \`buddy_delete_memory\` with confirmation code:
+
+\`\`\`
+buddy_delete_memory(confirmCode: "${confirmCode}")
+\`\`\`
+
+⏰ This code expires in **5 minutes**.
+
+To cancel, simply do not confirm.`;
+                    
+                    return summary;
                 }
             }),
 
