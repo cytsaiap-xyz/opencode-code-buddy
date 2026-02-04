@@ -680,7 +680,7 @@ Respond in JSON format only:
                 async execute(args) {
                     const taskType = detectTaskType(args.task);
                     const complexity = estimateComplexity(args.task);
-                    const shouldExecute = args.execute !== false; // Default to true
+                    const shouldExecute = args.execute === true; // Default to false
 
                     // Use deduplication for task recording
                     const dedupResult = await addMemoryWithDedup({
@@ -753,6 +753,60 @@ ${(steps[taskType as keyof typeof steps] || steps.task).map((s, i) => `${i + 1}.
 > Use \`buddy_remember("${args.task.split(' ').slice(0, 3).join(' ')}")\` to recall this task later.`;
 
                     return output;
+                }
+            }),
+
+            buddy_done: tool({
+                description: "Record a completed task with results and learnings",
+                args: {
+                    task: tool.schema.string().describe("What task was completed"),
+                    result: tool.schema.string().describe("The outcome/result of the task"),
+                    learnings: tool.schema.string().optional().describe("Key learnings or insights from this task"),
+                    type: tool.schema.string().optional().describe("Memory type: decision, bugfix, lesson, pattern, feature, note (default: feature)")
+                },
+                async execute(args) {
+                    const memoryType = (args.type as MemoryType) || "feature";
+                    const category = MEMORY_TYPE_CATEGORY[memoryType] || "knowledge";
+                    
+                    // Build content with result and learnings
+                    let content = `## Task\n${args.task}\n\n## Result\n${args.result}`;
+                    if (args.learnings) {
+                        content += `\n\n## Learnings\n${args.learnings}`;
+                    }
+
+                    // Save with deduplication
+                    const result = await addMemoryWithDedup({
+                        type: memoryType,
+                        category: category,
+                        title: `Done: ${args.task.substring(0, 50)}${args.task.length > 50 ? '...' : ''}`,
+                        content: content,
+                        tags: ["buddy-done", category, memoryType]
+                    }, false);
+
+                    let statusEmoji = "✅";
+                    let statusMsg = "";
+                    
+                    if (result.action === 'created') {
+                        statusMsg = `Saved to memory (ID: ${result.entry?.id})`;
+                    } else if (result.action === 'merged') {
+                        statusEmoji = "🔄";
+                        statusMsg = `Merged with existing similar record`;
+                    } else {
+                        statusEmoji = "⚠️";
+                        statusMsg = `Similar record exists - use forceSave to save anyway`;
+                    }
+
+                    return `${statusEmoji} **Task Completed**: ${args.task}
+
+### 📋 Result
+${args.result}
+
+${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ''}
+### 📊 Memory Info
+- **Type**: ${memoryType} (${category})
+- **Status**: ${statusMsg}
+
+> Recall with \`buddy_remember("${args.task.split(' ').slice(0, 3).join(' ')}")\``;
                 }
             }),
 

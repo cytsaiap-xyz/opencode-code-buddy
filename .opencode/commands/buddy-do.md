@@ -1,29 +1,36 @@
 ---
-description: "🎯 Execute a development task with AI assistance"
+description: "🎯 Analyze a development task and record to memory"
 ---
 
-Use the `buddy_do` tool to execute this task: $ARGUMENTS
+Use the `buddy_do` tool to analyze this task: $ARGUMENTS
 
 ## Features
 
-| Feature                  | Description                                           |
-| ------------------------ | ----------------------------------------------------- |
-| **AI Execution**         | Provides analysis, solution, and next steps           |
-| **Auto-Recording**       | Saves to memory with deduplication                    |
-| **Smart Type Detection** | Identifies task type (implement, fix, refactor, etc.) |
+| Feature             | Description                              |
+| ------------------- | ---------------------------------------- |
+| **Task Analysis**   | Identifies type and complexity           |
+| **Step Suggestion** | Provides recommended execution steps     |
+| **Auto-Recording**  | Saves to memory with deduplication       |
+| **AI Execution**    | Optional - set `execute: true` to use AI |
 
 ## Parameters
 
-| Parameter | Default  | Description                |
-| --------- | -------- | -------------------------- |
-| `task`    | required | Task description           |
-| `execute` | true     | Execute using AI           |
-| `context` | optional | Code or additional context |
+| Parameter | Default  | Description                  |
+| --------- | -------- | ---------------------------- |
+| `task`    | required | Task description             |
+| `execute` | false    | Set true to execute using AI |
+| `context` | optional | Code or additional context   |
 
 ## Example
 
 ```
-buddy_do("Implement user login with JWT")
-buddy_do("Fix the null pointer exception", context: "function foo() { ... }")
-buddy_do("Research best practices for API rate limiting", execute: false)
+buddy_do("Implement user login")
+buddy_do("Fix null pointer", execute: true)
+buddy_do("Research caching", context: "Redis vs Memcached")
+```
+
+## Workflow
+
+```
+buddy_do("task")  →  Execute  →  buddy_done("task", "result")
 ```
