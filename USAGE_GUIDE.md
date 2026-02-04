@@ -12,8 +12,9 @@ A comprehensive guide for using the Code Buddy plugin in OpenCode.
 6. [Error Learning](#error-learning)
 7. [Workflow Guidance](#workflow-guidance)
 8. [AI Integration](#ai-integration)
-9. [Best Practices](#best-practices)
-10. [Troubleshooting](#troubleshooting)
+9. [Hook System](#hook-system)
+10. [Best Practices](#best-practices)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -97,6 +98,7 @@ buddy_remember("registration")
 Execute and analyze a development task.
 
 **Arguments:**
+
 - `task` (string, required): Description of the task
 
 **Examples:**
@@ -116,6 +118,7 @@ buddy_do("Research best practices for GraphQL pagination")
 ```
 
 **What it does:**
+
 1. Analyzes task type (implement, fix, refactor, research, etc.)
 2. Estimates complexity (low, medium, high)
 3. Generates suggested execution steps
@@ -148,6 +151,7 @@ The memory system stores project decisions, patterns, and lessons learned.
 Search through project memories.
 
 **Arguments:**
+
 - `query` (string, required): Search keywords
 - `limit` (number, optional): Max results (default: 5)
 - `type` (string, optional): Filter by type
@@ -202,6 +206,7 @@ buddy_remember_stats()
 Manually add a memory entry.
 
 **Arguments:**
+
 - `title` (string, required): Memory title
 - `content` (string, required): Memory content
 - `type` (string, required): Memory type
@@ -238,6 +243,7 @@ The knowledge graph manages entities and their relationships.
 Create a knowledge entity.
 
 **Arguments:**
+
 - `name` (string, required): Entity name
 - `type` (string, required): Entity type
 - `observations` (string[], required): List of facts/observations
@@ -292,6 +298,7 @@ buddy_search_entities("user", 5)
 Create a relationship between entities.
 
 **Arguments:**
+
 - `from` (string, required): Source entity
 - `to` (string, required): Target entity
 - `type` (string, required): Relation type
@@ -322,6 +329,7 @@ Record and learn from AI mistakes to prevent repetition.
 Record an AI mistake.
 
 **Arguments:**
+
 - `action` (string): What the AI did wrong
 - `errorType` (string): Type of error
 - `userCorrection` (string): What the user corrected
@@ -331,6 +339,7 @@ Record an AI mistake.
 - `relatedRule` (string, optional): Related rule
 
 **Error types:**
+
 - `procedure-violation`: Violated a procedure
 - `workflow-skip`: Skipped a workflow step
 - `assumption-error`: Made a wrong assumption
@@ -381,12 +390,14 @@ Get development phase guidance and recommendations.
 Get workflow guidance for current phase.
 
 **Arguments:**
+
 - `phase` (string, required): Current phase
 - `filesChanged` (string[], optional): Changed files
 - `testsPassing` (boolean, optional): Tests status
 - `hasLintErrors` (boolean, optional): Lint status
 
 **Phases:**
+
 - `idle`: Not actively working
 - `planning`: Planning the work
 - `implementing`: Writing code
@@ -442,6 +453,7 @@ Optionally connect to vLLM or other OpenAI-compatible APIs.
 Configure AI connection.
 
 **Arguments:**
+
 - `baseUrl` (string, required): API base URL
 - `model` (string, required): Model name
 - `apiKey` (string, optional): API key
@@ -541,16 +553,185 @@ buddy_get_session_health()
 
 ---
 
+## Hook System
+
+Code Buddy 使用 OpenCode 的原生 Hook 系統，在特定事件發生時自動執行動作。
+
+### 可用的 Hooks
+
+| Hook                | 預設  | 事件                  | 功能              |
+| ------------------- | ----- | --------------------- | ----------------- |
+| `autoRemind`        | ✅ 開 | `session.idle`        | AI 完成時提醒記錄 |
+| `protectEnv`        | ✅ 開 | `tool.execute.before` | 阻止敏感檔案存取  |
+| `trackFiles`        | ❌ 關 | `file.edited`         | 自動追蹤檔案編輯  |
+| `compactionContext` | ✅ 開 | `session.compacting`  | 壓縮時注入記憶    |
+
+---
+
+### autoRemind (session.idle)
+
+**用途**: 當 AI 完成回應後，提醒使用者記錄任務結果。
+
+**觸發時機**: 每次 AI 回應結束時
+
+**行為**:
+
+```
+[code-buddy] 💡 Reminder: 3 task(s) completed. Use buddy_done to record results.
+```
+
+**使用場景**:
+
+- 防止忘記記錄重要的任務結果
+- 維持專案記憶的完整性
+
+---
+
+### protectEnv (tool.execute.before)
+
+**用途**: 阻止任何工具讀取敏感設定檔。
+
+**保護的檔案模式**:
+
+- `.env`
+- `.env.local`
+- `.env.production`
+- 包含 `secrets` 的路徑
+
+**觸發時機**: 任何工具執行前
+
+**行為**:
+
+```
+[code-buddy] ⚠️ Protected file access blocked: .env
+Error: [Code Buddy] Access to protected file ".env" is blocked.
+```
+
+**使用場景**:
+
+- 保護 API 金鑰不被意外讀取
+- 防止敏感資訊洩漏到 AI 模型
+
+**停用方式**:
+
+```json
+{
+  "hooks": {
+    "protectEnv": false
+  }
+}
+```
+
+---
+
+### trackFiles (file.edited)
+
+**用途**: 自動記錄專案中被編輯的檔案。
+
+**預設狀態**: 關閉 (可能產生大量記憶)
+
+**忽略的路徑**:
+
+- `node_modules/`
+- `.git/`
+- `dist/`
+- `build/`
+- `.next/`
+- `package-lock.json`
+
+**觸發時機**: 每次檔案被編輯時
+
+**行為**:
+
+```
+[code-buddy] 📝 Tracked file edit: src/components/Login.tsx
+```
+
+**記憶格式**:
+
+```
+Type: feature (knowledge)
+Title: File edited: Login.tsx
+Content: Edited file: src/components/Login.tsx
+Tags: auto-tracked, file-edit
+```
+
+**啟用方式**:
+
+```json
+{
+  "hooks": {
+    "trackFiles": true
+  }
+}
+```
+
+---
+
+### compactionContext (session.compacting)
+
+**用途**: 當 Session 太長需要壓縮時，保留最近的記憶作為上下文。
+
+**觸發時機**: OpenCode 執行 session compaction 時
+
+**行為**:
+在壓縮 prompt 中注入:
+
+```markdown
+## Code Buddy Memory Context
+
+Recent project memories that should persist:
+
+- [feature] Task: Implement login...
+- [decision] Use JWT for auth
+- [bugfix] Fix null pointer...
+
+Use `buddy_remember` to recall more details if needed.
+```
+
+**效果**:
+
+- 即使對話被壓縮，重要的專案記憶仍會保留
+- AI 可以繼續參考之前的決策和任務
+
+---
+
+### Hook 設定
+
+所有 Hook 設定都在 `.opencode/code-buddy/config.json`:
+
+```json
+{
+  "hooks": {
+    "autoRemind": true,
+    "protectEnv": true,
+    "trackFiles": false,
+    "compactionContext": true
+  }
+}
+```
+
+### 驗證 Hooks 是否運作
+
+1. **autoRemind**: 執行任務後觀察 console 輸出
+2. **protectEnv**: 嘗試讓 AI 讀取 `.env` 檔案
+3. **trackFiles**: 啟用後編輯檔案，檢查 `buddy_remember_recent()`
+4. **compactionContext**: 長對話後檢查壓縮的 context
+
+---
+
 ## Troubleshooting
 
 ### Plugin Not Loading
 
 1. Verify the plugin directory exists:
+
    ```bash
    ls ~/.config/opencode/plugins/code-buddy/
    ```
 
 2. Check dependencies are installed:
+
    ```bash
    cd ~/.config/opencode/plugins/code-buddy
    npm install
@@ -561,6 +742,7 @@ buddy_get_session_health()
 ### Commands Not Found
 
 Verify the plugin initialized:
+
 ```
 buddy_help()
 ```
@@ -570,6 +752,7 @@ If you see an error, check the console for initialization errors.
 ### Data Not Persisting
 
 Check if the data directory is writable:
+
 ```bash
 ls -la .opencode/code-buddy/data/
 ```
@@ -577,11 +760,13 @@ ls -la .opencode/code-buddy/data/
 ### AI Connection Failed
 
 1. Verify the AI service is running:
+
    ```bash
    curl http://localhost:8000/v1/models
    ```
 
 2. Check configuration:
+
    ```
    buddy_get_ai_status()
    ```
