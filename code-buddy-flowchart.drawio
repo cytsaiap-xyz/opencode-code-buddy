@@ -1,0 +1,240 @@
+<mxfile host="app.diagrams.net" modified="2026-02-11T00:30:00.000Z" agent="Code Buddy Plugin" version="24.0.0" type="device">
+  <diagram id="code-buddy-flow" name="Code Buddy Architecture">
+    <mxGraphModel dx="1434" dy="820" grid="1" gridSize="8" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- Title -->
+        <mxCell id="title" value="&lt;b&gt;OpenCode Code Buddy Plugin - Architecture Flow&lt;/b&gt;" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;fontSize=20;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="400" y="24" width="480" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================ -->
+        <!-- Module: Plugin Init -->
+        <!-- ============================================ -->
+        <mxCell id="mod_init" value="&lt;b&gt;Plugin Initialization&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;arcSize=12;shadow=1;fontSize=11;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="544" y="80" width="192" height="48" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="load_config" value="Load Config&lt;br&gt;(config.json)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=10;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="320" y="160" width="144" height="40" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="init_storage" value="Init LocalStorage&lt;br&gt;(JSON files)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=8;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="544" y="152" width="144" height="56" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="init_llm" value="Init LLM&lt;br&gt;(OpenAI API)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="768" y="160" width="144" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Arrows from init -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=2;" edge="1" parent="1" source="mod_init" target="load_config">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=2;" edge="1" parent="1" source="mod_init" target="init_storage">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=2;" edge="1" parent="1" source="mod_init" target="init_llm">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================ -->
+        <!-- Module: User Interaction (Tools) -->
+        <!-- ============================================ -->
+        <mxCell id="mod_tools" value="" style="swimlane;startSize=32;fillColor=#f0f4ff;strokeColor=#6c8ebf;rounded=1;arcSize=8;shadow=1;fontStyle=1;fontSize=12;horizontal=1;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="56" y="264" width="1168" height="200" as="geometry"/>
+        </mxCell>
+        <mxCell id="mod_tools_label" value="&lt;b&gt;🛠️ User Tools (23 Tools)&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontColor=#000000;" vertex="1" parent="mod_tools">
+          <mxGeometry x="16" y="0" width="200" height="32" as="geometry"/>
+        </mxCell>
+
+        <!-- Task Tools -->
+        <mxCell id="buddy_do" value="🎯 buddy_do&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Analyze Task&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;shadow=1;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_tools">
+          <mxGeometry x="24" y="48" width="120" height="48" as="geometry"/>
+        </mxCell>
+        <mxCell id="buddy_done" value="✅ buddy_done&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Record Result&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;shadow=1;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_tools">
+          <mxGeometry x="160" y="48" width="120" height="48" as="geometry"/>
+        </mxCell>
+
+        <!-- Memory Tools -->
+        <mxCell id="buddy_remember" value="🔍 buddy_remember&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Search Memory&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;shadow=1;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_tools">
+          <mxGeometry x="296" y="48" width="128" height="48" as="geometry"/>
+        </mxCell>
+        <mxCell id="buddy_add" value="📝 buddy_add_memory&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Add + AI Auto-Tag&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;shadow=1;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_tools">
+          <mxGeometry x="440" y="48" width="136" height="48" as="geometry"/>
+        </mxCell>
+
+        <!-- KG Tools -->
+        <mxCell id="buddy_entity" value="🕸️ Knowledge Graph&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Entities + Relations&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;shadow=1;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_tools">
+          <mxGeometry x="592" y="48" width="136" height="48" as="geometry"/>
+        </mxCell>
+
+        <!-- Error Tools -->
+        <mxCell id="buddy_mistake" value="⚠️ Error Learning&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Record + Patterns&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;shadow=1;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_tools">
+          <mxGeometry x="744" y="48" width="128" height="48" as="geometry"/>
+        </mxCell>
+
+        <!-- Config Tools -->
+        <mxCell id="buddy_config" value="⚙️ Config &amp; Help&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;LLM + Stats&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;shadow=1;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_tools">
+          <mxGeometry x="888" y="48" width="120" height="48" as="geometry"/>
+        </mxCell>
+
+        <!-- Workflow -->
+        <mxCell id="buddy_workflow" value="📋 Workflow&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Phase Guidance&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;shadow=1;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_tools">
+          <mxGeometry x="1024" y="48" width="120" height="48" as="geometry"/>
+        </mxCell>
+
+        <!-- Task Flow Arrow -->
+        <mxCell id="e_task" value="task flow" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#82b366;strokeWidth=1.5;dashed=0;fontSize=9;fontColor=#000000;" edge="1" parent="mod_tools" source="buddy_do" target="buddy_done">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Dedup label -->
+        <mxCell id="dedup_label" value="&lt;font style=&quot;font-size:9px&quot;&gt;All writes go through &lt;b&gt;addMemoryWithDedup()&lt;/b&gt;&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;fontSize=9;fontColor=#000000;" vertex="1" parent="mod_tools">
+          <mxGeometry x="24" y="120" width="280" height="24" as="geometry"/>
+        </mxCell>
+
+        <!-- Dedup flow -->
+        <mxCell id="dedup_box" value="🔄 Deduplication Engine&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Jaccard + LLM Similarity → Create / Merge / Skip&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe0b2;strokeColor=#e65100;shadow=1;fontSize=10;fontStyle=1;fontColor=#000000;" vertex="1" parent="mod_tools">
+          <mxGeometry x="328" y="128" width="360" height="48" as="geometry"/>
+        </mxCell>
+
+        <!-- Arrow from buddy_do to dedup -->
+        <mxCell id="e_do_dedup" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#e65100;strokeWidth=1.5;dashed=1;" edge="1" parent="mod_tools" source="buddy_do" target="dedup_box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_add_dedup" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#e65100;strokeWidth=1.5;dashed=1;" edge="1" parent="mod_tools" source="buddy_add" target="dedup_box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_done_dedup" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#e65100;strokeWidth=1.5;dashed=1;" edge="1" parent="mod_tools" source="buddy_done" target="dedup_box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================ -->
+        <!-- Module: Hooks -->
+        <!-- ============================================ -->
+        <mxCell id="mod_hooks" value="" style="swimlane;startSize=32;fillColor=#fce4ec;strokeColor=#c62828;rounded=1;arcSize=8;shadow=1;fontStyle=1;fontSize=12;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="56" y="504" width="1168" height="160" as="geometry"/>
+        </mxCell>
+        <mxCell id="mod_hooks_label" value="&lt;b&gt;🎣 Event Hooks (5 Hooks)&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontColor=#c62828;" vertex="1" parent="mod_hooks">
+          <mxGeometry x="16" y="0" width="200" height="32" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="hook_idle" value="💡 session.idle&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Auto-Remind +&lt;br&gt;Observer Summary&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;shadow=1;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_hooks">
+          <mxGeometry x="24" y="48" width="144" height="56" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="hook_before" value="🛡️ tool.execute.before&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Protect .env files&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;shadow=1;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_hooks">
+          <mxGeometry x="200" y="48" width="160" height="56" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="hook_after" value="🔍 tool.execute.after&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Background Observer&lt;br&gt;Capture Observations&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;shadow=1;fontSize=10;fontStyle=1;fontColor=#000000;" vertex="1" parent="mod_hooks">
+          <mxGeometry x="392" y="48" width="168" height="56" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="hook_file" value="📝 file.edited&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Track File Changes&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;shadow=1;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_hooks">
+          <mxGeometry x="592" y="48" width="144" height="56" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="hook_compact" value="📦 session.compacting&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Inject Memory Context&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;shadow=1;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_hooks">
+          <mxGeometry x="768" y="48" width="168" height="56" as="geometry"/>
+        </mxCell>
+
+        <!-- Observer Flow -->
+        <mxCell id="obs_buffer" value="📋 observationBuffer&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;[tool, args, result]&lt;/font&gt;" style="shape=parallelogram;perimeter=parallelogramPerimeter;whiteSpace=wrap;html=1;fixedSize=1;fillColor=#fff9c4;strokeColor=#f57f17;shadow=1;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_hooks">
+          <mxGeometry x="392" y="116" width="168" height="32" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_after_buf" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#f57f17;strokeWidth=1.5;" edge="1" parent="mod_hooks" source="hook_after" target="obs_buffer">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_buf_idle" value="≥ 3 actions" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#f57f17;strokeWidth=1.5;dashed=1;fontSize=9;fontColor=#000000;" edge="1" parent="mod_hooks" source="obs_buffer" target="hook_idle">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================ -->
+        <!-- Module: Storage -->
+        <!-- ============================================ -->
+        <mxCell id="mod_storage" value="" style="swimlane;startSize=32;fillColor=#fff8e1;strokeColor=#d6b656;rounded=1;arcSize=8;shadow=1;fontStyle=1;fontSize=12;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="56" y="704" width="1168" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="mod_storage_label" value="&lt;b&gt;💾 Persistent Storage (.opencode/code-buddy/data/)&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontColor=#d6b656;" vertex="1" parent="mod_storage">
+          <mxGeometry x="16" y="0" width="400" height="32" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="mem_file" value="📄 memory.json&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Memories + Categories&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=8;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_storage">
+          <mxGeometry x="40" y="40" width="152" height="64" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="ent_file" value="📄 entities.json&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Knowledge Graph&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=8;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_storage">
+          <mxGeometry x="232" y="40" width="152" height="64" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="rel_file" value="📄 relations.json&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Entity Relations&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=8;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_storage">
+          <mxGeometry x="424" y="40" width="152" height="64" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="mis_file" value="📄 mistakes.json&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Error Patterns&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=8;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_storage">
+          <mxGeometry x="616" y="40" width="152" height="64" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="cfg_file" value="📄 config.json&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;LLM + Hooks Config&lt;/font&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=8;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;fontColor=#000000;" vertex="1" parent="mod_storage">
+          <mxGeometry x="808" y="40" width="152" height="64" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================ -->
+        <!-- Module: AI / LLM -->
+        <!-- ============================================ -->
+        <mxCell id="ai_box" value="🤖 AI Layer (askAI)&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;OpenAI API / Fallback&lt;br&gt;• Dedup Similarity Check&lt;br&gt;• Observer Summarization&lt;br&gt;• Auto-Tag Generation&lt;br&gt;• Memory Merge&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;shadow=1;fontSize=10;fontStyle=1;arcSize=12;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="280" width="192" height="112" as="geometry"/>
+        </mxCell>
+
+        <!-- Cross-module connections -->
+        <mxCell id="e_init_tools" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#333;strokeWidth=2;" edge="1" parent="1" source="mod_init" target="mod_tools">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_tools_hooks" value="event-driven" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#c62828;strokeWidth=2;dashed=1;fontSize=9;fontColor=#000000;" edge="1" parent="1" source="mod_tools" target="mod_hooks">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_tools_storage" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#d6b656;strokeWidth=2;" edge="1" parent="1" source="mod_tools" target="mod_storage">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="32" y="460"/>
+              <mxPoint x="32" y="760"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_hooks_storage" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#d6b656;strokeWidth=1.5;dashed=1;" edge="1" parent="1" source="mod_hooks" target="mod_storage">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Legend -->
+        <mxCell id="legend" value="" style="swimlane;startSize=24;fillColor=#fafafa;strokeColor=#999;rounded=1;fontSize=11;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="56" y="856" width="600" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="legend_title" value="&lt;b&gt;Legend&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontColor=#000000;" vertex="1" parent="legend">
+          <mxGeometry x="8" y="0" width="80" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg1" value="&lt;font style=&quot;font-size:9px&quot;&gt;━━ Solid: Direct flow&lt;br&gt;┅┅ Dashed: Event/async flow&lt;/font&gt;" style="text;html=1;fontSize=9;fontColor=#000000;" vertex="1" parent="legend">
+          <mxGeometry x="8" y="28" width="160" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg2" value="&lt;font style=&quot;font-size:9px&quot;&gt;🟢 Task tools&lt;br&gt;🟡 Memory tools&lt;br&gt;🟣 KG / AI&lt;/font&gt;" style="text;html=1;fontSize=9;fontColor=#000000;" vertex="1" parent="legend">
+          <mxGeometry x="176" y="28" width="120" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg3" value="&lt;font style=&quot;font-size:9px&quot;&gt;🔴 Hooks&lt;br&gt;⚪ Config&lt;br&gt;🟠 Dedup Engine&lt;/font&gt;" style="text;html=1;fontSize=9;fontColor=#000000;" vertex="1" parent="legend">
+          <mxGeometry x="296" y="28" width="120" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg4" value="&lt;font style=&quot;font-size:9px&quot;&gt;🔵 Workflow&lt;br&gt;🗄️ Storage (cylinder)&lt;/font&gt;" style="text;html=1;fontSize=9;fontColor=#000000;" vertex="1" parent="legend">
+          <mxGeometry x="424" y="28" width="152" height="44" as="geometry"/>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

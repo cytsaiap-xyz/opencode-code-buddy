@@ -600,16 +600,29 @@ AI 使用工具 → tool.execute.after 攔截 → 累積到 observationBuffer
   "hooks": {
     "autoObserve": true,
     "observeMinActions": 3,
-    "observeIgnoreTools": ["buddy_remember", "buddy_help"]
+    "observeIgnoreTools": ["buddy_remember", "buddy_help"],
+    "fullAuto": true, // 啟用全自動多類型分析
+    "autoErrorDetect": true // 啟用自動錯誤偵測
   }
 }
 ```
 
-| 選項                 | 說明                                 |
-| -------------------- | ------------------------------------ |
-| `autoObserve`        | 啟用/停用背景觀察                    |
-| `observeMinActions`  | 最少幾次工具使用才觸發摘要 (預設: 3) |
-| `observeIgnoreTools` | 忽略的工具列表 (buddy\_\* 自動忽略)  |
+| 選項                 | 說明                                       |
+| -------------------- | ------------------------------------------ |
+| `autoObserve`        | 啟用/停用背景觀察                          |
+| `observeMinActions`  | 最少幾次工具使用才觸發摘要 (預設: 3)       |
+| `observeIgnoreTools` | 忽略的工具列表 (buddy\_\* 自動忽略)        |
+| `fullAuto`           | 啟用全自動多類型分析 (Task/Decision/Error) |
+| `autoErrorDetect`    | 啟用自動錯誤偵測與記錄                     |
+
+**Full Auto Mode (全自動模式)**:
+
+當 `fullAuto: true` 時，AI 會將觀察到的行為自動分類為：
+
+- **Task**: 正在進行的任務 (Feature/Bugfix)
+- **Decision**: 技術決策或架構選擇
+- **Error**: 自動偵測到的錯誤與修復方案 (寫入 `mistakes.json`)
+- **Pattern**: 可重複使用的程式碼模式
 
 **Fallback**: 無 LLM 時使用 rule-based 摘要 (列出使用的工具名稱)
 
@@ -742,6 +755,10 @@ Tags: auto-tracked, file-edit
 **行為**:
 在壓縮 prompt 中注入:
 
+- 最近的 **Project Memories** (Decisions, Features)
+- 最近的 **Known Issues** (Mistakes, Error Patterns)
+- 重要的 **Key Entities** (Knowledge Graph)
+
 ```markdown
 ## Code Buddy Memory Context
 
@@ -771,7 +788,10 @@ Use `buddy_remember` to recall more details if needed.
     "autoRemind": true,
     "protectEnv": true,
     "trackFiles": false,
-    "compactionContext": true
+    "compactionContext": true,
+    "autoObserve": true,
+    "fullAuto": true,
+    "autoErrorDetect": true
   }
 }
 ```

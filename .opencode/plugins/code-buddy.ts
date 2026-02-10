@@ -75,6 +75,8 @@ interface Observation {
     tool: string;
     args: Record<string, unknown>;
     result?: string;
+    hasError: boolean;
+    fileEdited?: string;
 }
 
 const MEMORY_TYPE_CATEGORY: Record<MemoryType, MemoryCategory> = {
@@ -170,6 +172,8 @@ interface PluginConfig {
         autoObserve: boolean;
         observeMinActions: number;
         observeIgnoreTools: string[];
+        fullAuto: boolean;
+        autoErrorDetect: boolean;
     };
 }
 
@@ -200,7 +204,9 @@ const defaultConfig: PluginConfig = {
         compactionContext: true,  // session.compacting - 壓縮時保留記憶
         autoObserve: true,        // 背景觀察者 - 自動記錄
         observeMinActions: 3,     // 最少觀察數才觸發摘要
-        observeIgnoreTools: ["buddy_remember", "buddy_help", "buddy_remember_recent", "buddy_remember_stats", "buddy_remember_by_category"]
+        observeIgnoreTools: ["buddy_remember", "buddy_help", "buddy_remember_recent", "buddy_remember_stats", "buddy_remember_by_category"],
+        fullAuto: true,           // 全自動模式 - 自動記錄 task/decision/error
+        autoErrorDetect: true     // 自動偵測錯誤輸出
     }
 };
 
@@ -1495,27 +1501,53 @@ ${response}`;
         // EVENT HOOKS
         // ========================================
 
-        // Hook: session.idle - AI 閒置時觸發觀察摘要
+        // Hook: session.idle - AI 閒置時觸發全自動分析
         event: async ({ event }: { event: { type: string; data?: unknown } }) => {
             if (event.type === "session.idle") {
                 session.lastActivity = Date.now();
 
-                // 提醒記錄
-                if (config.hooks.autoRemind && session.tasksCompleted > 0) {
+                // 提醒記錄（非 fullAuto 模式才提醒，fullAuto 不需要手動操作）
+                if (config.hooks.autoRemind && !config.hooks.fullAuto && session.tasksCompleted > 0) {
                     console.log(`[code-buddy] 💡 Reminder: ${session.tasksCompleted} task(s) completed. Use buddy_done to record results.`);
                 }
 
-                // 背景觀察者：摘要並儲存
+                // 全自動觀察者：多類型 AI 分析
                 if (config.hooks.autoObserve && observationBuffer.length >= config.hooks.observeMinActions) {
                     try {
+                        const hasErrors = observationBuffer.some(o => o.hasError);
+                        const editedFiles = observationBuffer.filter(o => o.fileEdited).map(o => o.fileEdited);
+
                         const observationSummary = observationBuffer.map(o => {
                             const toolInfo = `[${new Date(o.timestamp).toLocaleTimeString()}] ${o.tool}`;
                             const argsInfo = o.args ? ` (${Object.entries(o.args).map(([k, v]) => `${k}: ${typeof v === 'string' ? v.substring(0, 80) : JSON.stringify(v).substring(0, 80)}`).join(', ')})` : '';
                             const resultInfo = o.result ? `\n  → ${o.result}` : '';
-                            return `${toolInfo}${argsInfo}${resultInfo}`;
+                            const errorFlag = o.hasError ? ' ❌ ERROR' : '';
+                            return `${toolInfo}${argsInfo}${resultInfo}${errorFlag}`;
                         }).join('\n');
 
-                        const prompt = `You are a development observer AI. Analyze the following tool usage observations from a coding session and produce a JSON summary.
+                        // Full Auto: 多類型分析 prompt
+                        const prompt = config.hooks.fullAuto
+                            ? `You are a development observer AI analyzing a coding session. Produce a JSON ARRAY of memory entries.
+
+Observations:
+${observationSummary}
+${hasErrors ? '\n⚠️ Some observations contain errors.' : ''}
+${editedFiles.length > 0 ? `\n📝 Files edited: ${[...new Set(editedFiles)].join(', ')}` : ''}
+
+Rules:
+1. Analyze ALL observations and classify into one or more entries
+2. Each entry must have a "category" field: "task", "decision", "error", or "pattern"
+3. For "task": what was being worked on (type: "feature", "bugfix", or "note")
+4. For "decision": any architectural or technical choice made (type: "decision")
+5. For "error": any failed command or error encountered (type: "bugfix" or "lesson")
+6. For "pattern": any reusable coding pattern observed (type: "pattern")
+7. Each entry needs: category, title (max 60 chars), summary (1-2 sentences), type, tags (3-5 lowercase hyphenated)
+8. For "error" entries, add "errorInfo": {"pattern": "...", "solution": "...", "prevention": "..."}
+9. Output 1-4 entries. Don't create entries for trivial observations.
+
+Respond ONLY with a valid JSON array:
+[{"category": "task", "title": "...", "summary": "...", "type": "feature", "tags": ["..."]}, ...]`
+                            : `You are a development observer AI. Analyze the following tool usage observations and produce a JSON summary.
 
 Observations:
 ${observationSummary}
@@ -1531,37 +1563,99 @@ Respond ONLY with valid JSON:
 
                         const aiResponse = await askAI(prompt);
 
-                        // Parse AI response
-                        let parsed: { title: string; summary: string; type: MemoryType; tags: string[] };
-                        try {
-                            // Extract JSON from response (handle markdown code blocks)
-                            const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
-                            parsed = JSON.parse(jsonMatch ? jsonMatch[0] : aiResponse);
-                        } catch {
-                            // Fallback: rule-based summary
-                            const toolNames = [...new Set(observationBuffer.map(o => o.tool))];
-                            parsed = {
-                                title: `Session: ${toolNames.slice(0, 3).join(', ')}`,
-                                summary: `Used ${observationBuffer.length} tools: ${toolNames.join(', ')}`,
-                                type: "note",
-                                tags: ["auto-observed", ...toolNames.slice(0, 3)]
-                            };
+                        if (config.hooks.fullAuto) {
+                            // Full Auto: 解析 JSON array，多筆記憶
+                            type AutoEntry = { category: string; title: string; summary: string; type: MemoryType; tags: string[]; errorInfo?: { pattern: string; solution: string; prevention: string } };
+                            let entries: AutoEntry[] = [];
+                            try {
+                                const arrayMatch = aiResponse.match(/\[[\s\S]*\]/);
+                                entries = JSON.parse(arrayMatch ? arrayMatch[0] : aiResponse);
+                                if (!Array.isArray(entries)) entries = [entries as unknown as AutoEntry];
+                            } catch {
+                                // Fallback: rule-based
+                                const toolNames = [...new Set(observationBuffer.map(o => o.tool))];
+                                entries = [{
+                                    category: "task",
+                                    title: `Session: ${toolNames.slice(0, 3).join(', ')}`,
+                                    summary: `Used ${observationBuffer.length} tools: ${toolNames.join(', ')}`,
+                                    type: "note",
+                                    tags: ["auto-observed", ...toolNames.slice(0, 3)]
+                                }];
+                                // Fallback: error entries from buffer
+                                if (hasErrors) {
+                                    const errorObs = observationBuffer.filter(o => o.hasError);
+                                    entries.push({
+                                        category: "error",
+                                        title: `Error in ${errorObs[0]?.tool || 'unknown'}`,
+                                        summary: errorObs.map(o => o.result || '').join('; ').substring(0, 200),
+                                        type: "bugfix",
+                                        tags: ["auto-error", errorObs[0]?.tool || 'unknown']
+                                    });
+                                }
+                            }
+
+                            const validTypes: MemoryType[] = ["decision", "pattern", "bugfix", "lesson", "feature", "note"];
+                            let savedCount = 0;
+
+                            for (const entry of entries.slice(0, 4)) {
+                                if (!validTypes.includes(entry.type)) entry.type = "note";
+
+                                // 儲存記憶
+                                await addMemoryWithDedup({
+                                    type: entry.type,
+                                    category: MEMORY_TYPE_CATEGORY[entry.type],
+                                    title: entry.title,
+                                    content: entry.summary,
+                                    tags: [...(entry.tags || []), "auto-observed", `auto-${entry.category}`]
+                                }, false);
+                                savedCount++;
+
+                                // Error 自動寫入 mistakes.json
+                                if (entry.category === "error" && config.hooks.autoErrorDetect && entry.errorInfo) {
+                                    mistakes.push({
+                                        id: generateId('mistake'),
+                                        action: entry.title,
+                                        errorType: 'runtime' as ErrorType,
+                                        userCorrection: entry.summary,
+                                        correctMethod: entry.errorInfo.solution || '',
+                                        impact: entry.errorInfo.pattern || '',
+                                        preventionMethod: entry.errorInfo.prevention || '',
+                                        timestamp: Date.now(),
+                                        relatedRule: 'auto-detected'
+                                    });
+                                    saveMistakes();
+                                    session.errorsRecorded++;
+                                    console.log(`[code-buddy] ⚠️ Auto-detected error: ${entry.title}`);
+                                }
+                            }
+
+                            console.log(`[code-buddy] 🤖 Full Auto: saved ${savedCount} entries from ${observationBuffer.length} observations`);
+                        } else {
+                            // 原有模式：單一摘要
+                            let parsed: { title: string; summary: string; type: MemoryType; tags: string[] };
+                            try {
+                                const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+                                parsed = JSON.parse(jsonMatch ? jsonMatch[0] : aiResponse);
+                            } catch {
+                                const toolNames = [...new Set(observationBuffer.map(o => o.tool))];
+                                parsed = {
+                                    title: `Session: ${toolNames.slice(0, 3).join(', ')}`,
+                                    summary: `Used ${observationBuffer.length} tools: ${toolNames.join(', ')}`,
+                                    type: "note",
+                                    tags: ["auto-observed", ...toolNames.slice(0, 3)]
+                                };
+                            }
+                            const validTypes: MemoryType[] = ["decision", "pattern", "bugfix", "lesson", "feature", "note"];
+                            if (!validTypes.includes(parsed.type)) parsed.type = "note";
+                            const result = await addMemoryWithDedup({
+                                type: parsed.type,
+                                category: MEMORY_TYPE_CATEGORY[parsed.type],
+                                title: parsed.title,
+                                content: parsed.summary,
+                                tags: [...(parsed.tags || []), "auto-observed"]
+                            }, false);
+                            console.log(`[code-buddy] 🔍 Observer: ${result.message} (from ${observationBuffer.length} observations)`);
                         }
-
-                        // Validate type
-                        const validTypes: MemoryType[] = ["decision", "pattern", "bugfix", "lesson", "feature", "note"];
-                        if (!validTypes.includes(parsed.type)) parsed.type = "note";
-
-                        // Save via dedup
-                        const result = await addMemoryWithDedup({
-                            type: parsed.type,
-                            category: MEMORY_TYPE_CATEGORY[parsed.type],
-                            title: parsed.title,
-                            content: parsed.summary,
-                            tags: [...(parsed.tags || []), "auto-observed"]
-                        }, false);
-
-                        console.log(`[code-buddy] 🔍 Observer: ${result.message} (from ${observationBuffer.length} observations)`);
                     } catch (err) {
                         console.log(`[code-buddy] Observer error:`, err);
                     }
@@ -1587,7 +1681,7 @@ Respond ONLY with valid JSON:
             }
         },
 
-        // Hook: tool.execute.after - 背景觀察者捕捉工具執行
+        // Hook: tool.execute.after - 背景觀察者捕捉工具執行（含 error/file 偵測）
         "tool.execute.after": async (input: { tool: string; sessionID: string; callID: string }, output: { title: string; output: string; metadata: any }) => {
             if (!config.hooks.autoObserve) return;
 
@@ -1595,11 +1689,24 @@ Respond ONLY with valid JSON:
             const ignoreList = config.hooks.observeIgnoreTools || [];
             if (input.tool.startsWith("buddy_") || ignoreList.includes(input.tool)) return;
 
+            const outputStr = typeof output.output === 'string' ? output.output : '';
+            const resultSnippet = outputStr.substring(0, 200);
+
+            // Error 偵測：掃描輸出中的錯誤關鍵字
+            const errorPatterns = /\b(error|Error|ERROR|failed|FAILED|FAIL|exception|Exception|panic|fatal|Fatal|ENOENT|EACCES|TypeError|ReferenceError|SyntaxError)\b/;
+            const hasError = config.hooks.autoErrorDetect && errorPatterns.test(outputStr);
+
+            // File 偵測：檢查是否為檔案編輯工具
+            const meta = output.metadata || {};
+            const fileEdited = (meta.filePath || meta.path || meta.file) as string | undefined;
+
             observationBuffer.push({
                 timestamp: Date.now(),
                 tool: input.tool,
-                args: output.metadata || {},
-                result: typeof output.output === 'string' ? output.output.substring(0, 200) : undefined
+                args: meta,
+                result: resultSnippet,
+                hasError,
+                fileEdited
             });
 
             // Cap buffer at 50 observations
@@ -1627,28 +1734,48 @@ Respond ONLY with valid JSON:
             }
         },
 
-        // Hook: session.compacting - 壓縮時注入記憶
+        // Hook: session.compacting - 壓縮時注入記憶 + 錯誤 + 實體
         "experimental.session.compacting": async (_input: unknown, output: { context: string[] }) => {
             if (config.hooks.compactionContext) {
+                // 最近記憶
                 const recentMemories = [...memories]
                     .sort((a, b) => b.timestamp - a.timestamp)
                     .slice(0, 5);
-                
+
+                // 最近錯誤模式
+                const recentMistakes = [...mistakes]
+                    .sort((a, b) => b.timestamp - a.timestamp)
+                    .slice(0, 3);
+
+                // 重要實體
+                const topEntities = entities.slice(0, 5);
+
+                let contextBlock = '## Code Buddy Context (Auto-Injected)\n\n';
+
                 if (recentMemories.length > 0) {
-                    const memoryContext = recentMemories
-                        .map(m => `- [${m.type}] ${m.title}`)
-                        .join('\n');
-                    
-                    output.context.push(`## Code Buddy Memory Context
-
-Recent project memories that should persist:
-
-${memoryContext}
-
-Use \`buddy_remember\` to recall more details if needed.`);
-                    
-                    console.log(`[code-buddy] 📦 Injected ${recentMemories.length} memories into compaction context`);
+                    contextBlock += '### Recent Memories\n';
+                    contextBlock += recentMemories.map(m => `- [${m.type}] ${m.title}: ${m.content.substring(0, 80)}`).join('\n');
+                    contextBlock += '\n\n';
                 }
+
+                if (recentMistakes.length > 0) {
+                    contextBlock += '### Known Issues (Avoid Repeating)\n';
+                    contextBlock += recentMistakes.map(m => `- ⚠️ ${m.action} → Solution: ${m.correctMethod.substring(0, 80)}`).join('\n');
+                    contextBlock += '\n\n';
+                }
+
+                if (topEntities.length > 0) {
+                    contextBlock += '### Key Entities\n';
+                    contextBlock += topEntities.map(e => `- ${e.name} (${e.type})`).join('\n');
+                    contextBlock += '\n\n';
+                }
+
+                contextBlock += 'Use `buddy_remember` to recall more details if needed.';
+
+                output.context.push(contextBlock);
+
+                const totalInjected = recentMemories.length + recentMistakes.length + topEntities.length;
+                console.log(`[code-buddy] 📦 Injected ${totalInjected} items into compaction context (${recentMemories.length} memories, ${recentMistakes.length} mistakes, ${topEntities.length} entities)`);
             }
         }
     };
