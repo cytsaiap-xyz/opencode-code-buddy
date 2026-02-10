@@ -1,18 +1,17 @@
 {
     "name": "opencode-code-buddy",
-    "version": "1.0.0",
-    "description": "AI Development Assistant Plugin - Project Memory, Knowledge Graph, Smart Task Execution (Fully Offline)",
+    "version": "2.0.0",
+    "description": "AI Development Assistant Plugin - Project Memory, Knowledge Graph, Smart Task Execution, Full Auto Observer (Fully Offline)",
     "type": "module",
-    "main": "src/index.ts",
+    "main": ".opencode/plugins/code-buddy.ts",
     "scripts": {
-        "typecheck": "tsc --noEmit"
+        "install": "bash install.sh"
     },
     "dependencies": {
         "@opencode-ai/plugin": "latest",
         "zod": "^3.23.0"
     },
     "devDependencies": {
-        "@types/bun": "latest",
         "typescript": "^5.0.0"
     },
     "keywords": [
@@ -21,6 +20,7 @@
         "code-buddy",
         "memory",
         "knowledge-graph",
+        "auto-observer",
         "offline"
     ],
     "license": "MIT"
