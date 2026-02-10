@@ -69,6 +69,14 @@ type WorkflowPhase = "idle" | "planning" | "implementing" | "code-written" | "te
     "test-complete" | "reviewing" | "commit-ready" | "committed" | "deploying" | "completed";
 
 // Memory type to category mapping
+// Observation for background observer
+interface Observation {
+    timestamp: number;
+    tool: string;
+    args: Record<string, unknown>;
+    result?: string;
+}
+
 const MEMORY_TYPE_CATEGORY: Record<MemoryType, MemoryCategory> = {
     decision: "solution",
     bugfix: "solution",
@@ -159,6 +167,9 @@ interface PluginConfig {
         protectEnv: boolean;
         trackFiles: boolean;
         compactionContext: boolean;
+        autoObserve: boolean;
+        observeMinActions: number;
+        observeIgnoreTools: string[];
     };
 }
 
@@ -183,10 +194,13 @@ const defaultConfig: PluginConfig = {
         ai: true
     },
     hooks: {
-        autoRemind: true,        // session.idle - 任務完成提醒
-        protectEnv: true,        // tool.execute.before - 保護 .env
-        trackFiles: false,       // file.edited - 追蹤檔案 (預設關)
-        compactionContext: true  // session.compacting - 壓縮時保留記憶
+        autoRemind: true,         // session.idle - 任務完成提醒
+        protectEnv: true,         // tool.execute.before - 保護 .env
+        trackFiles: false,        // file.edited - 追蹤檔案 (預設關)
+        compactionContext: true,  // session.compacting - 壓縮時保留記憶
+        autoObserve: true,        // 背景觀察者 - 自動記錄
+        observeMinActions: 3,     // 最少觀察數才觸發摘要
+        observeIgnoreTools: ["buddy_remember", "buddy_help", "buddy_remember_recent", "buddy_remember_stats", "buddy_remember_by_category"]
     }
 };
 
@@ -243,6 +257,9 @@ export const CodeBuddyPlugin: Plugin = async (ctx) => {
         timestamp: number;
         confirmCode: string;
     } | null = null;
+
+    // Background observer buffer
+    const observationBuffer: Observation[] = [];
 
     // Helper functions
     const generateId = (prefix: string) => `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
@@ -964,11 +981,33 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ''}
                     forceSave: tool.schema.boolean().optional().describe("Set true to save even if similar memory exists")
                 },
                 async execute(args) {
+                    // AI auto-tag: 如果使用者未提供 tags，由 AI 自動產生
+                    let tags = args.tags || [];
+                    if (tags.length === 0) {
+                        try {
+                            const tagPrompt = `Generate 3-5 relevant tags for this memory entry. Tags should be lowercase, hyphenated, concise.
+
+Title: ${args.title}
+Content: ${args.content}
+Type: ${args.type}
+
+Respond ONLY with a JSON array of strings, e.g. ["tag-one", "tag-two", "tag-three"]`;
+                            const tagResponse = await askAI(tagPrompt);
+                            const tagMatch = tagResponse.match(/\[[\s\S]*\]/);
+                            if (tagMatch) {
+                                tags = JSON.parse(tagMatch[0]);
+                            }
+                        } catch {
+                            // Fallback: extract keywords from title
+                            tags = args.title.toLowerCase().split(/\s+/).filter((w: string) => w.length > 3).slice(0, 3);
+                        }
+                    }
+
                     const result = await addMemoryWithDedup({
                         type: args.type as MemoryType,
                         title: args.title,
                         content: args.content,
-                        tags: args.tags || []
+                        tags
                     }, args.forceSave || false);
 
                     if (result.action === 'created') {
@@ -1456,15 +1495,79 @@ ${response}`;
         // EVENT HOOKS
         // ========================================
 
-        // Hook: session.idle - 任務完成時提醒
+        // Hook: session.idle - AI 閒置時觸發觀察摘要
         event: async ({ event }: { event: { type: string; data?: unknown } }) => {
-            if (config.hooks.autoRemind && event.type === "session.idle") {
-                // 記錄 session 活動
+            if (event.type === "session.idle") {
                 session.lastActivity = Date.now();
-                
-                // 如果這個 session 有任務完成，提醒使用者
-                if (session.tasksCompleted > 0) {
+
+                // 提醒記錄
+                if (config.hooks.autoRemind && session.tasksCompleted > 0) {
                     console.log(`[code-buddy] 💡 Reminder: ${session.tasksCompleted} task(s) completed. Use buddy_done to record results.`);
+                }
+
+                // 背景觀察者：摘要並儲存
+                if (config.hooks.autoObserve && observationBuffer.length >= config.hooks.observeMinActions) {
+                    try {
+                        const observationSummary = observationBuffer.map(o => {
+                            const toolInfo = `[${new Date(o.timestamp).toLocaleTimeString()}] ${o.tool}`;
+                            const argsInfo = o.args ? ` (${Object.entries(o.args).map(([k, v]) => `${k}: ${typeof v === 'string' ? v.substring(0, 80) : JSON.stringify(v).substring(0, 80)}`).join(', ')})` : '';
+                            const resultInfo = o.result ? `\n  → ${o.result}` : '';
+                            return `${toolInfo}${argsInfo}${resultInfo}`;
+                        }).join('\n');
+
+                        const prompt = `You are a development observer AI. Analyze the following tool usage observations from a coding session and produce a JSON summary.
+
+Observations:
+${observationSummary}
+
+Rules:
+1. Summarize what was accomplished in 1-2 sentences
+2. Choose the best memory type: "decision", "pattern", "bugfix", "lesson", "feature", or "note"
+3. Generate 3-5 relevant tags (lowercase, no spaces, use hyphens)
+4. Create a concise title (max 60 chars)
+
+Respond ONLY with valid JSON:
+{"title": "...", "summary": "...", "type": "...", "tags": ["..."]}`;
+
+                        const aiResponse = await askAI(prompt);
+
+                        // Parse AI response
+                        let parsed: { title: string; summary: string; type: MemoryType; tags: string[] };
+                        try {
+                            // Extract JSON from response (handle markdown code blocks)
+                            const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+                            parsed = JSON.parse(jsonMatch ? jsonMatch[0] : aiResponse);
+                        } catch {
+                            // Fallback: rule-based summary
+                            const toolNames = [...new Set(observationBuffer.map(o => o.tool))];
+                            parsed = {
+                                title: `Session: ${toolNames.slice(0, 3).join(', ')}`,
+                                summary: `Used ${observationBuffer.length} tools: ${toolNames.join(', ')}`,
+                                type: "note",
+                                tags: ["auto-observed", ...toolNames.slice(0, 3)]
+                            };
+                        }
+
+                        // Validate type
+                        const validTypes: MemoryType[] = ["decision", "pattern", "bugfix", "lesson", "feature", "note"];
+                        if (!validTypes.includes(parsed.type)) parsed.type = "note";
+
+                        // Save via dedup
+                        const result = await addMemoryWithDedup({
+                            type: parsed.type,
+                            category: MEMORY_TYPE_CATEGORY[parsed.type],
+                            title: parsed.title,
+                            content: parsed.summary,
+                            tags: [...(parsed.tags || []), "auto-observed"]
+                        }, false);
+
+                        console.log(`[code-buddy] 🔍 Observer: ${result.message} (from ${observationBuffer.length} observations)`);
+                    } catch (err) {
+                        console.log(`[code-buddy] Observer error:`, err);
+                    }
+
+                    // Clear buffer
+                    observationBuffer.length = 0;
                 }
             }
         },
@@ -1478,21 +1581,40 @@ ${response}`;
                 for (const pattern of protectedPatterns) {
                     if (filePath.includes(pattern)) {
                         console.log(`[code-buddy] ⚠️ Protected file access blocked: ${filePath}`);
-                        throw new Error(`[Code Buddy] Access to protected file "${filePath}" is blocked. Add to config.hooks.protectEnv = false to disable.`);
+                        throw new Error(`[Code Buddy] Access to protected file "${filePath}" is blocked. Set config.hooks.protectEnv = false to disable.`);
                     }
                 }
+            }
+        },
+
+        // Hook: tool.execute.after - 背景觀察者捕捉工具執行
+        "tool.execute.after": async (input: { tool: string; sessionID: string; callID: string }, output: { title: string; output: string; metadata: any }) => {
+            if (!config.hooks.autoObserve) return;
+
+            // 忽略 buddy 自身工具（避免遞迴）
+            const ignoreList = config.hooks.observeIgnoreTools || [];
+            if (input.tool.startsWith("buddy_") || ignoreList.includes(input.tool)) return;
+
+            observationBuffer.push({
+                timestamp: Date.now(),
+                tool: input.tool,
+                args: output.metadata || {},
+                result: typeof output.output === 'string' ? output.output.substring(0, 200) : undefined
+            });
+
+            // Cap buffer at 50 observations
+            if (observationBuffer.length > 50) {
+                observationBuffer.splice(0, observationBuffer.length - 50);
             }
         },
 
         // Hook: file.edited - 檔案編輯追蹤
         "file.edited": async (input: { path: string }) => {
             if (config.hooks.trackFiles && input.path) {
-                // 過濾掉一些常見的不需要追蹤的檔案
                 const ignoredPatterns = ["node_modules", ".git", "dist", "build", ".next", "package-lock"];
                 const shouldTrack = !ignoredPatterns.some(p => input.path.includes(p));
                 
                 if (shouldTrack) {
-                    // 記錄到記憶中
                     await addMemoryWithDedup({
                         type: "feature",
                         category: "knowledge",
@@ -1508,7 +1630,6 @@ ${response}`;
         // Hook: session.compacting - 壓縮時注入記憶
         "experimental.session.compacting": async (_input: unknown, output: { context: string[] }) => {
             if (config.hooks.compactionContext) {
-                // 取得最近的記憶
                 const recentMemories = [...memories]
                     .sort((a, b) => b.timestamp - a.timestamp)
                     .slice(0, 5);

@@ -22,6 +22,9 @@
         "autoRemind": true,
         "protectEnv": true,
         "trackFiles": false,
-        "compactionContext": true
+        "compactionContext": true,
+        "autoObserve": true,
+        "observeMinActions": 3,
+        "observeIgnoreTools": ["buddy_remember", "buddy_help", "buddy_remember_recent", "buddy_remember_stats", "buddy_remember_by_category"]
     }
 }

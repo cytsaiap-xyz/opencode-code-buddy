@@ -559,12 +559,77 @@ Code Buddy 使用 OpenCode 的原生 Hook 系統，在特定事件發生時自�
 
 ### 可用的 Hooks
 
-| Hook                | 預設  | 事件                  | 功能              |
-| ------------------- | ----- | --------------------- | ----------------- |
-| `autoRemind`        | ✅ 開 | `session.idle`        | AI 完成時提醒記錄 |
-| `protectEnv`        | ✅ 開 | `tool.execute.before` | 阻止敏感檔案存取  |
-| `trackFiles`        | ❌ 關 | `file.edited`         | 自動追蹤檔案編輯  |
-| `compactionContext` | ✅ 開 | `session.compacting`  | 壓縮時注入記憶    |
+| Hook                | 預設  | 事件                                  | 功能              |
+| ------------------- | ----- | ------------------------------------- | ----------------- |
+| `autoRemind`        | ✅ 開 | `session.idle`                        | AI 完成時提醒記錄 |
+| `protectEnv`        | ✅ 開 | `tool.execute.before`                 | 阻止敏感檔案存取  |
+| `trackFiles`        | ❌ 關 | `file.edited`                         | 自動追蹤檔案編輯  |
+| `compactionContext` | ✅ 開 | `session.compacting`                  | 壓縮時注入記憶    |
+| `autoObserve`       | ✅ 開 | `tool.execute.after` + `session.idle` | 🆕 背景觀察者     |
+
+---
+
+### autoObserve (Background Observer) 🆕
+
+**用途**: 像旁觀者一樣自動觀察 AI 的工具使用行為，並在 AI 閒置時自動摘要儲存。
+
+**工作流程**:
+
+```
+AI 使用工具 → tool.execute.after 攔截 → 累積到 observationBuffer
+                                            ↓
+                                    session.idle 觸發
+                                            ↓
+                               AI 自動產生摘要 + tags
+                                            ↓
+                                  addMemoryWithDedup()
+```
+
+**自動記錄範例**:
+
+```
+🔍 Observer: ✅ Memory created: "Implemented JWT auth endpoint" (from 8 observations)
+   Type: feature
+   Tags: [jwt, authentication, api, express, auto-observed]
+```
+
+**設定選項**:
+
+```json
+{
+  "hooks": {
+    "autoObserve": true,
+    "observeMinActions": 3,
+    "observeIgnoreTools": ["buddy_remember", "buddy_help"]
+  }
+}
+```
+
+| 選項                 | 說明                                 |
+| -------------------- | ------------------------------------ |
+| `autoObserve`        | 啟用/停用背景觀察                    |
+| `observeMinActions`  | 最少幾次工具使用才觸發摘要 (預設: 3) |
+| `observeIgnoreTools` | 忽略的工具列表 (buddy\_\* 自動忽略)  |
+
+**Fallback**: 無 LLM 時使用 rule-based 摘要 (列出使用的工具名稱)
+
+---
+
+### AI Auto-Tag 🆕
+
+**用途**: 使用 `buddy_add_memory` 時若未提供 tags，AI 自動根據標題和內容產生 3-5 個相關 tag。
+
+**範例**:
+
+```
+# 不需要手動填 tags，AI 會自動產生
+buddy_add_memory(
+  title: "Use Redis for session caching",
+  content: "Chose Redis for low-latency...",
+  type: "decision"
+)
+# AI 自動產生 tags: ["redis", "session", "caching", "infrastructure"]
+```
 
 ---
 
