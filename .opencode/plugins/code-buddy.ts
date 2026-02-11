@@ -8,8 +8,8 @@
 
 import { tool } from "@opencode-ai/plugin";
 import type { Plugin } from "@opencode-ai/plugin";
-import * as fs from "fs";
-import * as path from "path";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 // ============================================
 // Local Storage System
@@ -1501,8 +1501,28 @@ ${response}`;
         // EVENT HOOKS
         // ========================================
 
-        // Hook: session.idle - AI 閒置時觸發全自動分析
-        event: async ({ event }: { event: { type: string; data?: unknown } }) => {
+        // Hook: event - handle session.idle and file.edited events
+        event: async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
+            // === file.edited event ===
+            if (event.type === "file.edited") {
+                const filePath = (event.properties?.file as string) || '';
+                if (config.hooks.trackFiles && filePath) {
+                    const ignoredPatterns = ["node_modules", ".git", "dist", "build", ".next", "package-lock"];
+                    const shouldTrack = !ignoredPatterns.some(p => filePath.includes(p));
+                    if (shouldTrack) {
+                        await addMemoryWithDedup({
+                            type: "feature",
+                            title: `File edited: ${filePath.split('/').pop()}`,
+                            content: `Edited file: ${filePath}`,
+                            tags: ["auto-tracked", "file-edit"]
+                        }, false);
+                        console.log(`[code-buddy] 📝 Tracked file edit: ${filePath}`);
+                    }
+                }
+                return;
+            }
+
+            // === session.idle event ===
             if (event.type === "session.idle") {
                 session.lastActivity = Date.now();
 
@@ -1615,7 +1635,7 @@ Respond ONLY with valid JSON:
                                     mistakes.push({
                                         id: generateId('mistake'),
                                         action: entry.title,
-                                        errorType: 'runtime' as ErrorType,
+                                        errorType: 'other' as ErrorType,
                                         userCorrection: entry.summary,
                                         correctMethod: entry.errorInfo.solution || '',
                                         impact: entry.errorInfo.pattern || '',
@@ -1712,25 +1732,6 @@ Respond ONLY with valid JSON:
             // Cap buffer at 50 observations
             if (observationBuffer.length > 50) {
                 observationBuffer.splice(0, observationBuffer.length - 50);
-            }
-        },
-
-        // Hook: file.edited - 檔案編輯追蹤
-        "file.edited": async (input: { path: string }) => {
-            if (config.hooks.trackFiles && input.path) {
-                const ignoredPatterns = ["node_modules", ".git", "dist", "build", ".next", "package-lock"];
-                const shouldTrack = !ignoredPatterns.some(p => input.path.includes(p));
-                
-                if (shouldTrack) {
-                    await addMemoryWithDedup({
-                        type: "feature",
-                        category: "knowledge",
-                        title: `File edited: ${input.path.split('/').pop()}`,
-                        content: `Edited file: ${input.path}`,
-                        tags: ["auto-tracked", "file-edit"]
-                    }, false);
-                    console.log(`[code-buddy] 📝 Tracked file edit: ${input.path}`);
-                }
             }
         },
 
