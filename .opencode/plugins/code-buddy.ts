@@ -10,6 +10,7 @@ import { tool } from "@opencode-ai/plugin";
 import type { Plugin } from "@opencode-ai/plugin";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as os from "node:os";
 
 // ============================================
 // Local Storage System
@@ -18,8 +19,8 @@ import * as path from "node:path";
 class LocalStorage {
     private baseDir: string;
 
-    constructor(projectDir: string) {
-        this.baseDir = path.join(projectDir, ".opencode", "code-buddy", "data");
+    constructor(dataDir: string) {
+        this.baseDir = dataDir;
         this.ensureDir();
     }
 
@@ -216,10 +217,11 @@ const defaultConfig: PluginConfig = {
 
 export const CodeBuddyPlugin: Plugin = async (ctx) => {
     const { directory, client } = ctx;
-    const storage = new LocalStorage(directory);
+    const globalBase = path.join(os.homedir(), ".config", "opencode", "code-buddy");
+    const storage = new LocalStorage(path.join(globalBase, "data"));
 
-    // Load configuration
-    const configPath = path.join(directory, ".opencode", "code-buddy", "config.json");
+    // Load configuration (from global path)
+    const configPath = path.join(globalBase, "config.json");
     let config: PluginConfig = { ...defaultConfig };
     try {
         if (fs.existsSync(configPath)) {

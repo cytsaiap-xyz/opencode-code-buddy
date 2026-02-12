@@ -29,12 +29,9 @@
 # Clone the repository
 git clone https://github.com/cytsaiap-xyz/opencode-code-buddy.git
 
-# Run install script
+# Run install script (installs globally to ~/.config/opencode/)
 cd opencode-code-buddy
-./install.sh /path/to/your/project
-
-# Or install to current directory
-./install.sh .
+./install.sh
 ```
 
 ### Manual Install
@@ -44,24 +41,18 @@ cd opencode-code-buddy
 git clone https://github.com/cytsaiap-xyz/opencode-code-buddy.git
 
 # Create directories
-mkdir -p YOUR_PROJECT/.opencode/plugins
-mkdir -p YOUR_PROJECT/.opencode/commands
-mkdir -p YOUR_PROJECT/.opencode/code-buddy
+mkdir -p ~/.config/opencode/plugins
+mkdir -p ~/.config/opencode/commands
+mkdir -p ~/.config/opencode/code-buddy
 
 # Copy plugin (single file)
-cp opencode-code-buddy/.opencode/plugins/code-buddy.ts YOUR_PROJECT/.opencode/plugins/
+cp opencode-code-buddy/.opencode/plugins/code-buddy.ts ~/.config/opencode/plugins/
 
 # Copy default config
-cp opencode-code-buddy/.opencode/code-buddy/config.json YOUR_PROJECT/.opencode/code-buddy/
+cp opencode-code-buddy/.opencode/code-buddy/config.json ~/.config/opencode/code-buddy/
 
 # Copy slash commands
-cp opencode-code-buddy/.opencode/commands/*.md YOUR_PROJECT/.opencode/commands/
-```
-
-### Global Install
-
-```bash
-./install.sh ~/.config/opencode
+cp opencode-code-buddy/.opencode/commands/*.md ~/.config/opencode/commands/
 ```
 
 ## 📁 File Structure
