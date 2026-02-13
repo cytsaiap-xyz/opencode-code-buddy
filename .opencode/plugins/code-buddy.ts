@@ -140,15 +140,12 @@ interface SessionState {
 }
 
 // ============================================
-// LLM Configuration (OpenAI Compatible)
+// LLM Configuration (via OpenCode Providers)
 // ============================================
 
 interface LLMConfig {
-    enabled: boolean;
-    provider: string;
-    baseUrl: string;
-    apiKey: string;
-    model: string;
+    preferredProvider: string;  // e.g. "nvidia", "anthropic", "openai"
+    preferredModel: string;     // e.g. "moonshotai/kimi-k2.5"
     maxTokens: number;
     temperature: number;
 }
@@ -180,11 +177,8 @@ interface PluginConfig {
 
 const defaultConfig: PluginConfig = {
     llm: {
-        enabled: true,
-        provider: "openai",
-        baseUrl: "https://api.openai.com/v1",
-        apiKey: "",
-        model: "gpt-4o-mini",
+        preferredProvider: "",
+        preferredModel: "",
         maxTokens: 2048,
         temperature: 0.7
     },
@@ -317,19 +311,77 @@ export const CodeBuddyPlugin: Plugin = async (ctx) => {
         return "medium";
     };
 
-    // AI helper - supports OpenAI-compatible API or fallback to OpenCode's AI
+    // Resolved provider cache
+    let resolvedProvider: { providerID: string; modelID: string; baseURL: string; apiKey: string; name: string } | null = null;
+
+    // Resolve provider from OpenCode SDK
+    const resolveProvider = async (): Promise<typeof resolvedProvider> => {
+        if (resolvedProvider) return resolvedProvider;
+
+        try {
+            const result = await client.config.providers();
+            if (!result.data) return null;
+
+            const providers = result.data.providers || [];
+            if (providers.length === 0) return null;
+
+            // Find preferred provider/model or use first available
+            let targetProvider: any = null;
+            let targetModelID = "";
+
+            if (config.llm.preferredProvider) {
+                targetProvider = providers.find((p: any) => p.id === config.llm.preferredProvider);
+            }
+            if (!targetProvider) {
+                targetProvider = providers[0];
+            }
+
+            if (!targetProvider) return null;
+
+            // Find model
+            const modelKeys = Object.keys(targetProvider.models || {});
+            if (config.llm.preferredModel && modelKeys.includes(config.llm.preferredModel)) {
+                targetModelID = config.llm.preferredModel;
+            } else if (modelKeys.length > 0) {
+                targetModelID = modelKeys[0];
+            } else {
+                return null;
+            }
+
+            // Extract connection info
+            const baseURL = targetProvider.options?.baseURL || targetProvider.options?.baseUrl || "";
+            const apiKey = targetProvider.key || targetProvider.options?.apiKey || "";
+
+            resolvedProvider = {
+                providerID: targetProvider.id,
+                modelID: targetModelID,
+                baseURL: String(baseURL),
+                apiKey: String(apiKey),
+                name: targetProvider.name || targetProvider.id
+            };
+
+            console.log(`[code-buddy] Resolved provider: ${resolvedProvider.name} (${resolvedProvider.modelID})`);
+            return resolvedProvider;
+        } catch (error) {
+            console.log("[code-buddy] Error resolving provider:", error);
+            return null;
+        }
+    };
+
+    // AI helper - uses OpenCode's configured providers
     const askAI = async (prompt: string): Promise<string> => {
-        // Try OpenAI-compatible API if configured
-        if (config.llm.enabled && config.llm.apiKey) {
+        const provider = await resolveProvider();
+
+        if (provider && provider.baseURL && provider.apiKey) {
             try {
-                const response = await fetch(`${config.llm.baseUrl}/chat/completions`, {
+                const response = await fetch(`${provider.baseURL}/chat/completions`, {
                     method: "POST",
                     headers: {
                         "Content-Type": "application/json",
-                        "Authorization": `Bearer ${config.llm.apiKey}`
+                        "Authorization": `Bearer ${provider.apiKey}`
                     },
                     body: JSON.stringify({
-                        model: config.llm.model,
+                        model: provider.modelID,
                         messages: [{ role: "user", content: prompt }],
                         max_tokens: config.llm.maxTokens,
                         temperature: config.llm.temperature
@@ -341,9 +393,11 @@ export const CodeBuddyPlugin: Plugin = async (ctx) => {
                     if (data.choices && data.choices[0]?.message?.content) {
                         return data.choices[0].message.content;
                     }
+                } else {
+                    console.log(`[code-buddy] LLM API error: ${response.status} ${response.statusText}`);
                 }
             } catch (error) {
-                console.log("[code-buddy] OpenAI API error:", error);
+                console.log("[code-buddy] LLM API call error:", error);
             }
         }
 
@@ -358,12 +412,19 @@ ${prompt}
 Note: This is a buddy_ask_ai tool call. Please provide a helpful response based on your knowledge.`;
     };
 
+    // Check if LLM is available
+    const isLLMAvailable = async (): Promise<boolean> => {
+        const provider = await resolveProvider();
+        return !!(provider && provider.baseURL && provider.apiKey);
+    };
+
     // Get LLM status
-    const getLLMStatus = (): string => {
-        if (config.llm.enabled && config.llm.apiKey) {
-            return `Connected (${config.llm.provider}: ${config.llm.model})`;
+    const getLLMStatus = async (): Promise<string> => {
+        const provider = await resolveProvider();
+        if (provider) {
+            return `Connected (${provider.name}: ${provider.modelID})`;
         }
-        return "Using OpenCode's built-in AI";
+        return "No provider configured — using OpenCode's built-in AI";
     };
 
     // ============================================
@@ -395,7 +456,7 @@ Note: This is a buddy_ask_ai tool call. Please provide a helpful response based 
 
     // Check semantic similarity using LLM
     const checkSemanticSimilarity = async (text1: string, text2: string): Promise<{ similar: boolean; score: number; reason: string }> => {
-        if (!config.llm.enabled || !config.llm.apiKey) {
+        if (!(await isLLMAvailable())) {
             return { similar: false, score: 0, reason: "LLM not configured" };
         }
 
@@ -453,7 +514,7 @@ Respond in JSON only:
         }
 
         // If LLM is enabled and requested, check semantic similarity
-        if (useLLM && config.llm.enabled && config.llm.apiKey && memories.length > 0) {
+        if (useLLM && (await isLLMAvailable()) && memories.length > 0) {
             // Check top candidates (most recent memories of same type or similar tags)
             const candidates = memories.slice(-10); // Check last 10 memories
             const llmMatches: MemoryEntry[] = [];
@@ -545,7 +606,7 @@ Respond in JSON format only:
         }
 
         // Found similar memories
-        if (similar.length === 1 && config.llm.enabled && config.llm.apiKey) {
+        if (similar.length === 1 && (await isLLMAvailable())) {
             // Try to merge with LLM
             const merged = await mergeMemoriesWithAI(similar[0], { title: entry.title, content: entry.content });
             if (merged) {
@@ -577,7 +638,8 @@ Respond in JSON format only:
         };
     };
 
-    console.log(`[code-buddy] Plugin initialized - LLM: ${getLLMStatus()}`);
+    // Init log (async)
+    getLLMStatus().then(status => console.log(`[code-buddy] Plugin initialized - LLM: ${status}`));
 
 
     return {
@@ -586,62 +648,131 @@ Respond in JSON format only:
             // CONFIG
             // ========================================
             buddy_config: tool({
-                description: "View or update LLM configuration (OpenAI-compatible API)",
+                description: "View or update LLM provider configuration",
                 args: {
-                    action: tool.schema.string().optional().describe("Action: view, set_api_key, set_model, set_base_url"),
+                    action: tool.schema.string().optional().describe("Action: view, set_provider, set_model"),
                     value: tool.schema.string().optional().describe("Value for the setting")
                 },
                 async execute(args) {
                     const action = args.action || "view";
 
                     if (action === "view") {
-                        const safeConfig = {
-                            ...config.llm,
-                            apiKey: config.llm.apiKey ? "***configured***" : "(not set)"
-                        };
-                        return `## ⚙️ LLM Configuration
+                        const provider = await resolveProvider();
+                        const status = await getLLMStatus();
 
-**Status**: ${getLLMStatus()}
+                        let providerInfo = "No provider resolved";
+                        if (provider) {
+                            providerInfo = `| Provider | ${provider.name} (${provider.providerID}) |\n| Model | ${provider.modelID} |\n| Base URL | ${provider.baseURL} |\n| API Key | ***configured*** |`;
+                        }
 
-### Current Settings
-| Setting | Value |
-|---------|-------|
-| Provider | ${safeConfig.provider} |
-| Base URL | ${safeConfig.baseUrl} |
-| Model | ${safeConfig.model} |
-| API Key | ${safeConfig.apiKey} |
-| Max Tokens | ${safeConfig.maxTokens} |
-| Temperature | ${safeConfig.temperature} |
-
-### Config File
-\`${configPath}\`
-
-### How to Configure
-1. Edit \`.opencode/code-buddy/config.json\`
-2. Or use: \`buddy_config("set_api_key", "your-key")\`
-3. Or use: \`buddy_config("set_model", "gpt-4o")\`
-4. Or use: \`buddy_config("set_base_url", "https://api.example.com/v1")\``;
+                        return `## ⚙️ LLM Configuration\n\n**Status**: ${status}\n\n### Resolved Provider\n| Setting | Value |\n|---------|-------|\n${providerInfo}\n\n### Config\n| Setting | Value |\n|---------|-------|\n| Preferred Provider | ${config.llm.preferredProvider || "(auto)"} |\n| Preferred Model | ${config.llm.preferredModel || "(auto)"} |\n| Max Tokens | ${config.llm.maxTokens} |\n| Temperature | ${config.llm.temperature} |\n\n### Config File\n\`${configPath}\`\n\n### How to Configure\n1. Set provider in \`opencode.json\` → auto-detected\n2. Or use: \`buddy_config("set_provider", "nvidia")\`\n3. Or use: \`buddy_config("set_model", "moonshotai/kimi-k2.5")\``;
                     }
 
-                    if (action === "set_api_key" && args.value) {
-                        config.llm.apiKey = args.value;
+                    if (action === "set_provider" && args.value) {
+                        config.llm.preferredProvider = args.value;
+                        resolvedProvider = null; // force re-resolve
                         fs.writeFileSync(configPath, JSON.stringify(config, null, 4), "utf-8");
-                        return `✅ API Key updated successfully!\n\nLLM Status: ${getLLMStatus()}`;
+                        const status = await getLLMStatus();
+                        return `✅ Preferred provider set to: ${args.value}\n\nLLM Status: ${status}`;
                     }
 
                     if (action === "set_model" && args.value) {
-                        config.llm.model = args.value;
+                        config.llm.preferredModel = args.value;
+                        resolvedProvider = null; // force re-resolve
                         fs.writeFileSync(configPath, JSON.stringify(config, null, 4), "utf-8");
-                        return `✅ Model updated to: ${args.value}`;
+                        return `✅ Preferred model set to: ${args.value}`;
                     }
 
-                    if (action === "set_base_url" && args.value) {
-                        config.llm.baseUrl = args.value;
-                        fs.writeFileSync(configPath, JSON.stringify(config, null, 4), "utf-8");
-                        return `✅ Base URL updated to: ${args.value}`;
+                    return `❌ Unknown action: ${action}\n\nAvailable actions: view, set_provider, set_model`;
+                }
+            }),
+
+            // ========================================
+            // LLM TEST
+            // ========================================
+            buddy_llm_test: tool({
+                description: "Test LLM provider connectivity. Lists all available providers and verifies API connection.",
+                args: {
+                    provider: tool.schema.string().optional().describe("Specific provider ID to test (tests all if omitted)")
+                },
+                async execute(args) {
+                    let output = `## 🔌 LLM Provider Test\n\n`;
+
+                    try {
+                        const result = await client.config.providers();
+                        if (!result.data) {
+                            return output + `❌ Failed to query OpenCode providers API`;
+                        }
+
+                        const providers = result.data.providers || [];
+                        if (providers.length === 0) {
+                            return output + `⚠️ No providers configured in \`opencode.json\`\n\nPlease add a provider to your \`opencode.json\` config.`;
+                        }
+
+                        output += `### Available Providers (${providers.length})\n\n`;
+
+                        for (const p of providers) {
+                            if (args.provider && p.id !== args.provider) continue;
+
+                            const modelKeys = Object.keys(p.models || {});
+                            const baseURL = (p as any).options?.baseURL || (p as any).options?.baseUrl || "";
+                            const apiKey = p.key || (p as any).options?.apiKey || "";
+
+                            output += `#### ${p.name || p.id} (\`${p.id}\`)\n`;
+                            output += `- **Source**: ${p.source}\n`;
+                            output += `- **Base URL**: ${baseURL || "(not set)"}\n`;
+                            output += `- **API Key**: ${apiKey ? "✅ configured" : "❌ not set"}\n`;
+                            output += `- **Models**: ${modelKeys.length > 0 ? modelKeys.join(", ") : "(none)"}\n`;
+
+                            // Connectivity test
+                            if (baseURL && apiKey && modelKeys.length > 0) {
+                                const testModel = modelKeys[0];
+                                const startTime = Date.now();
+                                try {
+                                    const testResponse = await fetch(`${baseURL}/chat/completions`, {
+                                        method: "POST",
+                                        headers: {
+                                            "Content-Type": "application/json",
+                                            "Authorization": `Bearer ${apiKey}`
+                                        },
+                                        body: JSON.stringify({
+                                            model: testModel,
+                                            messages: [{ role: "user", content: "Hello, respond with just 'OK'." }],
+                                            max_tokens: 10,
+                                            temperature: 0
+                                        })
+                                    });
+                                    const latency = Date.now() - startTime;
+
+                                    if (testResponse.ok) {
+                                        const testData = await testResponse.json() as any;
+                                        const reply = testData.choices?.[0]?.message?.content || "(empty)";
+                                        output += `- **Connection Test**: ✅ OK (${latency}ms) — "${reply.trim().substring(0, 50)}"\n`;
+                                    } else {
+                                        output += `- **Connection Test**: ❌ HTTP ${testResponse.status} (${latency}ms)\n`;
+                                    }
+                                } catch (testError: any) {
+                                    const latency = Date.now() - startTime;
+                                    output += `- **Connection Test**: ❌ Error (${latency}ms): ${testError.message || testError}\n`;
+                                }
+                            } else {
+                                output += `- **Connection Test**: ⏭️ Skipped (missing baseURL, apiKey, or models)\n`;
+                            }
+
+                            output += `\n`;
+                        }
+
+                        // Show active resolution
+                        const resolved = await resolveProvider();
+                        if (resolved) {
+                            output += `### Active Provider\n**${resolved.name}** using model \`${resolved.modelID}\`\n`;
+                        }
+
+                    } catch (error: any) {
+                        output += `❌ Error: ${error.message || error}\n`;
                     }
 
-                    return `❌ Unknown action: ${action}\n\nAvailable actions: view, set_api_key, set_model, set_base_url`;
+                    return output;
                 }
             }),
 
