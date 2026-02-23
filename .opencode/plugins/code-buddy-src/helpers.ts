@@ -66,6 +66,15 @@ export function calculateSimilarity(text1: string, text2: string): number {
     return union > 0 ? intersection / union : 0;
 }
 
+// ---- Visualization ----
+
+/** Strip emoji characters from text, collapsing leftover double-spaces. */
+export function stripEmojis(text: string): string {
+    return text
+        .replace(/\p{Extended_Pictographic}/gu, "")
+        .replace(/ {2,}/g, " ");
+}
+
 // ---- Task classification ----
 
 export function detectTaskType(task: string): string {
