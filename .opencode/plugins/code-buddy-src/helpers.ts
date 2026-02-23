@@ -66,13 +66,38 @@ export function calculateSimilarity(text1: string, text2: string): number {
     return union > 0 ? intersection / union : 0;
 }
 
-// ---- Visualization ----
+// ---- Verbose / compact output ----
 
-/** Strip emoji characters from text, collapsing leftover double-spaces. */
-export function stripEmojis(text: string): string {
+/**
+ * Compact tool output for non-verbose mode.
+ * Strips emojis, markdown decoration, tables, progress bars —
+ * keeps only the essential text on minimal lines.
+ */
+export function compactOutput(text: string): string {
     return text
+        // strip emojis
         .replace(/\p{Extended_Pictographic}/gu, "")
-        .replace(/ {2,}/g, " ");
+        // markdown headers → plain text
+        .replace(/^#{1,6}\s+/gm, "")
+        // bold markers
+        .replace(/\*\*([^*]+)\*\*/g, "$1")
+        // table separator rows  |---|---|
+        .replace(/^\|[-|: ]+\|$/gm, "")
+        // table data rows  | Key | Value |  → Key: Value
+        .replace(/^\|\s*(.+?)\s*\|\s*(.+?)\s*\|$/gm, "$1: $2")
+        // progress bars  █░
+        .replace(/[█░]+/g, "")
+        // horizontal rules
+        .replace(/^-{3,}$/gm, "")
+        // blockquote markers
+        .replace(/^>\s+/gm, "")
+        // code-fence markers (keep content)
+        .replace(/^```\w*$/gm, "")
+        // collapse 3+ blank lines → 1
+        .replace(/\n{3,}/g, "\n")
+        // collapse double spaces
+        .replace(/ {2,}/g, " ")
+        .trim();
 }
 
 // ---- Task classification ----

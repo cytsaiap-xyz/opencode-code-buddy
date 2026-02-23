@@ -12,7 +12,7 @@ import { saveConfig } from "./config";
 import {
     generateId, generateConfirmCode, searchText,
     getMemoryCategory, detectTaskType, estimateComplexity,
-    stripEmojis,
+    compactOutput,
     TASK_STEPS, WORKFLOW_STEPS, WORKFLOW_PROGRESS,
 } from "./helpers";
 import {
@@ -26,8 +26,8 @@ import type { PluginState } from "./state";
 // ============================================
 
 /**
- * Wraps a tool definition so its output is piped through stripEmojis()
- * when `config.features.visualization` is false.
+ * Wraps a tool definition so its output is compacted (emojis, markdown
+ * decoration, tables, progress bars stripped) when `features.verbose` is false.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function vizTool(s: PluginState, config: any) {
@@ -37,7 +37,7 @@ function vizTool(s: PluginState, config: any) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         async execute(args: any) {
             const result: string = await origExecute(args);
-            return s.config.features.verbose !== false ? result : stripEmojis(result);
+            return s.config.features.verbose !== false ? result : compactOutput(result);
         },
     });
 }
