@@ -17,9 +17,11 @@ mkdir -p "$GLOBAL_DIR/plugins"
 mkdir -p "$GLOBAL_DIR/commands"
 mkdir -p "$GLOBAL_DIR/code-buddy"
 
-# Copy plugin (single file)
+# Copy plugin entry point + modules
 echo "📦 Copying plugin..."
 cp "$SCRIPT_DIR/.opencode/plugins/code-buddy.ts" "$GLOBAL_DIR/plugins/"
+rm -rf "$GLOBAL_DIR/plugins/code-buddy-src"
+cp -r "$SCRIPT_DIR/.opencode/plugins/code-buddy-src" "$GLOBAL_DIR/plugins/code-buddy-src"
 
 # Copy default config (don't overwrite if exists)
 if [ ! -f "$GLOBAL_DIR/code-buddy/config.json" ]; then
@@ -36,17 +38,12 @@ cp "$SCRIPT_DIR/.opencode/commands/"*.md "$GLOBAL_DIR/commands/" 2>/dev/null || 
 # Count installed commands
 CMD_COUNT=$(ls -1 "$GLOBAL_DIR/commands/"buddy-*.md 2>/dev/null | wc -l | tr -d ' ')
 
-# Clean up old plugin directory if exists (from previous versions)
-if [ -d "$GLOBAL_DIR/plugins/code-buddy" ]; then
-    echo "🧹 Removing old plugin directory..."
-    rm -rf "$GLOBAL_DIR/plugins/code-buddy"
-fi
-
 echo ""
 echo "✅ Installation complete!"
 echo ""
 echo "📁 Installed files:"
 echo "   Plugin:   $GLOBAL_DIR/plugins/code-buddy.ts"
+echo "   Modules:  $GLOBAL_DIR/plugins/code-buddy-src/ (8 files)"
 echo "   Config:   $GLOBAL_DIR/code-buddy/config.json"
 echo "   Commands: $GLOBAL_DIR/commands/ ($CMD_COUNT commands)"
 echo "   Data:     $GLOBAL_DIR/code-buddy/data/ (shared across projects)"
@@ -55,15 +52,6 @@ echo "🚀 Usage:"
 echo "   1. cd <any-project>"
 echo "   2. opencode"
 echo "   3. Type /buddy-help or use buddy_help tool"
-echo ""
-echo "📊 Features (23 Tools):"
-echo "   ✓ Persistent memory storage (global, cross-project)"
-echo "   ✓ Knowledge graph (entities & relations)"
-echo "   ✓ Error learning system"
-echo "   ✓ Workflow guidance"
-echo "   ✓ Session health monitoring"
-echo "   ✓ Full Auto Observer (auto task/decision/error recording)"
-echo "   ✓ AI Auto-Tag generation"
 echo ""
 echo "⚙️  Config: Edit $GLOBAL_DIR/code-buddy/config.json to customize hooks & LLM"
 echo ""
