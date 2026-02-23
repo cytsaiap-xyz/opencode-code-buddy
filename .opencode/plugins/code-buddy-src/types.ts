@@ -90,6 +90,7 @@ export interface Observation {
     result?: string;
     hasError: boolean;
     fileEdited?: string;
+    isWriteAction: boolean;
 }
 
 // ---- Pending Deletion ----
@@ -143,6 +144,8 @@ export interface PluginConfig {
         observeIgnoreTools: string[];
         fullAuto: boolean;
         autoErrorDetect: boolean;
+        /** Only auto-record when the observation buffer contains at least one write action (file edit, bash, etc.). */
+        requireEditForRecord: boolean;
     };
 }
 

@@ -13,6 +13,23 @@ import { askAI, addMemoryWithDedup, extractJSON, extractJSONArray } from "./llm"
 import type { PluginState } from "./state";
 
 // ============================================
+// Write-action detection for observation filter
+// ============================================
+
+/** Tool name patterns that indicate a write / mutating action. */
+const WRITE_TOOL_PATTERNS = [
+    "edit", "write", "create", "delete", "remove", "move", "rename",
+    "bash", "shell", "terminal", "exec", "run",
+    "insert", "replace", "patch", "apply",
+];
+
+/** Returns true if the tool name looks like a write/mutating action. */
+function isWriteTool(toolName: string): boolean {
+    const lower = toolName.toLowerCase();
+    return WRITE_TOOL_PATTERNS.some((p) => lower.includes(p));
+}
+
+// ============================================
 // Factory — returns all hook handlers
 // ============================================
 
@@ -57,13 +74,17 @@ export function createHooks(s: PluginState) {
 
             const meta = output.metadata || {};
 
+            const fileEdited = (meta.filePath || meta.path || meta.file) as string | undefined;
+            const isWriteAction = isWriteTool(input.tool) || !!fileEdited;
+
             s.pushObservation({
                 timestamp: Date.now(),
                 tool: input.tool,
                 args: meta,
                 result: outputStr.substring(0, 200),
                 hasError,
-                fileEdited: (meta.filePath || meta.path || meta.file) as string | undefined,
+                fileEdited,
+                isWriteAction,
             });
         },
 
@@ -133,6 +154,18 @@ async function handleSessionIdle(s: PluginState): Promise<void> {
     // Auto-observer
     if (!s.config.hooks.autoObserve || s.observationBuffer.length < s.config.hooks.observeMinActions) return;
 
+    // Action-type filter: skip recording for read-only sessions (unless errors detected)
+    if (s.config.hooks.requireEditForRecord) {
+        const hasWriteAction = s.observationBuffer.some((o) => o.isWriteAction);
+        const hasErrors = s.observationBuffer.some((o) => o.hasError);
+
+        if (!hasWriteAction && !hasErrors) {
+            s.log("[code-buddy] 📖 Read-only session detected, skipping auto-record");
+            s.clearObservations();
+            return;
+        }
+    }
+
     try {
         if (s.config.hooks.fullAuto) {
             await processFullAutoObserver(s);
@@ -157,6 +190,11 @@ interface AutoEntry {
     errorInfo?: { pattern: string; solution: string; prevention: string };
 }
 
+interface AutoResponse {
+    intent: string;
+    entries: AutoEntry[];
+}
+
 async function processFullAutoObserver(s: PluginState): Promise<void> {
     const buf = s.observationBuffer;
     const hasErrors = buf.some((o) => o.hasError);
@@ -170,15 +208,23 @@ async function processFullAutoObserver(s: PluginState): Promise<void> {
         return `[${time}] ${o.tool}${argsStr}${o.result ? `\n  → ${o.result}` : ""}${o.hasError ? " ❌ ERROR" : ""}`;
     }).join("\n");
 
-    const prompt = `You are a development observer AI analyzing a coding session. Produce a JSON ARRAY of memory entries.
+    const prompt = `You are a development observer AI analyzing a coding session.
+
+First, classify the session intent, then produce memory entries that match that intent.
 
 Observations:
 ${observationSummary}
 ${hasErrors ? "\n⚠️ Some observations contain errors." : ""}
 ${editedFiles.length > 0 ? `\n📝 Files edited: ${editedFiles.join(", ")}` : ""}
 
-Rules:
-1. Analyze ALL observations and classify into one or more entries
+Step 1 — Classify the session intent (pick one):
+- "task-execution": focused work building or changing something → prefer type "feature" or "bugfix"
+- "debugging": errors encountered, repeated attempts, same files revisited → prefer type "bugfix" or "lesson"
+- "refactoring": similar changes applied across multiple files → prefer type "pattern" or "decision"
+- "exploration": mostly reading/searching, minimal edits → prefer type "note" or "lesson"
+
+Step 2 — Produce memory entries guided by the intent:
+1. **MERGE related actions into a single entry.** Multiple edits to the same component, file area, or logical concern MUST become one entry, not three. Group by intent, not by individual tool call.
 2. Each entry must have a "category" field: "task", "decision", "error", or "pattern"
 3. For "task": what was being worked on (type: "feature", "bugfix", or "note")
 4. For "decision": any architectural or technical choice made (type: "decision")
@@ -186,41 +232,68 @@ Rules:
 6. For "pattern": any reusable coding pattern observed (type: "pattern")
 7. Each entry needs: category, title (max 60 chars), summary (1-2 sentences), type, tags (3-5 lowercase hyphenated)
 8. For "error" entries, add "errorInfo": {"pattern": "...", "solution": "...", "prevention": "..."}
-9. Output 1-4 entries. Don't create entries for trivial observations.
+9. Output 1-3 entries. Fewer is better. Don't create entries for trivial observations.
+10. **Tags must be specific and descriptive.** Use the actual domain concepts from the code, NOT generic labels.
+    - BAD tags: "code-change", "file-edit", "update", "enhancement", "modification"
+    - GOOD tags: "ui-layout", "auth-flow", "api-validation", "css-flexbox", "react-hooks", "db-migration"
 
-Respond ONLY with a valid JSON array:
-[{"category": "task", "title": "...", "summary": "...", "type": "feature", "tags": ["..."]}, ...]`;
+Respond ONLY with valid JSON:
+{"intent": "task-execution", "entries": [{"category": "task", "title": "...", "summary": "...", "type": "feature", "tags": ["..."]}]}`;
 
     const aiResponse = await askAI(s, prompt);
 
+    let intent = "unknown";
     let entries: AutoEntry[] = [];
-    const parsed = extractJSONArray(aiResponse);
-    if (parsed) {
-        entries = parsed as AutoEntry[];
+
+    // Try wrapper format: { intent, entries }
+    const wrapper = extractJSON(aiResponse) as AutoResponse | null;
+    if (wrapper?.intent && Array.isArray(wrapper.entries)) {
+        intent = wrapper.intent;
+        entries = wrapper.entries;
     } else {
-        // Try single object
-        const single = extractJSON(aiResponse);
-        if (single) entries = [single as AutoEntry];
+        // Fallback: try bare array
+        const arr = extractJSONArray(aiResponse);
+        if (arr) {
+            entries = arr as AutoEntry[];
+        } else if (wrapper) {
+            // Single entry without wrapper
+            entries = [wrapper as unknown as AutoEntry];
+        }
     }
 
+    s.log(`[code-buddy] 🧠 AI classified intent: ${intent}`);
+
     if (entries.length === 0) {
-        // Rule-based fallback
-        const toolNames = [...new Set(buf.map((o) => o.tool))];
+        // Rule-based fallback — group by edited files for meaningful tags
+        const fileNames = editedFiles
+            .map((f) => (f as string).split("/").pop()?.replace(/\.[^.]+$/, "") || "")
+            .filter(Boolean);
+        const fileTags = fileNames.length > 0
+            ? fileNames.slice(0, 3)
+            : [...new Set(buf.map((o) => o.tool))].slice(0, 3);
+
+        const title = editedFiles.length > 0
+            ? `Edit ${fileNames.slice(0, 2).join(", ")}${fileNames.length > 2 ? ` +${fileNames.length - 2}` : ""}`
+            : `Session: ${[...new Set(buf.map((o) => o.tool))].slice(0, 3).join(", ")}`;
+
         entries = [{
             category: "task",
-            title: `Session: ${toolNames.slice(0, 3).join(", ")}`,
-            summary: `Used ${buf.length} tools: ${toolNames.join(", ")}`,
+            title,
+            summary: editedFiles.length > 0
+                ? `Edited ${editedFiles.length} file(s): ${editedFiles.join(", ")}`
+                : `Used ${buf.length} tool calls across the session`,
             type: "note",
-            tags: ["auto-observed", ...toolNames.slice(0, 3)],
+            tags: ["auto-observed", ...fileTags],
         }];
         if (hasErrors) {
             const errorObs = buf.filter((o) => o.hasError);
+            const errorFile = errorObs[0]?.fileEdited?.split("/").pop() || errorObs[0]?.tool || "unknown";
             entries.push({
                 category: "error",
-                title: `Error in ${errorObs[0]?.tool || "unknown"}`,
+                title: `Error in ${errorFile}`,
                 summary: errorObs.map((o) => o.result || "").join("; ").substring(0, 200),
                 type: "bugfix",
-                tags: ["auto-error", errorObs[0]?.tool || "unknown"],
+                tags: ["auto-error", errorFile.replace(/\.[^.]+$/, "")],
             });
         }
     }
@@ -273,33 +346,55 @@ async function processSingleSummaryObserver(s: PluginState): Promise<void> {
         return `[${time}] ${o.tool}${argsStr}${o.result ? `\n  → ${o.result}` : ""}${o.hasError ? " ❌ ERROR" : ""}`;
     }).join("\n");
 
-    const prompt = `You are a development observer AI. Analyze the following tool usage observations and produce a JSON summary.
+    const prompt = `You are a development observer AI. Analyze the following tool usage observations.
+
+First, classify the session intent, then produce a single cohesive memory entry.
 
 Observations:
 ${observationSummary}
 
-Rules:
-1. Summarize what was accomplished in 1-2 sentences
-2. Choose the best memory type: "decision", "pattern", "bugfix", "lesson", "feature", or "note"
-3. Generate 3-5 relevant tags (lowercase, no spaces, use hyphens)
-4. Create a concise title (max 60 chars)
+Step 1 — Classify the session intent (pick one):
+- "task-execution": focused work building or changing something → prefer type "feature" or "bugfix"
+- "debugging": errors encountered, repeated attempts, same files revisited → prefer type "bugfix" or "lesson"
+- "refactoring": similar changes applied across multiple files → prefer type "pattern" or "decision"
+- "exploration": mostly reading/searching, minimal edits → prefer type "note" or "lesson"
+
+Step 2 — Produce a single memory entry guided by the intent:
+1. Summarize the overall session in 1-2 sentences. Merge related actions (e.g. multiple edits to the same area) into one description.
+2. Choose the best memory type based on your classified intent: "decision", "pattern", "bugfix", "lesson", "feature", or "note"
+3. Create a concise title (max 60 chars) that captures the high-level goal, not individual steps.
+4. Generate 3-5 specific, descriptive tags using actual domain concepts from the code.
+   - BAD tags: "code-change", "file-edit", "update", "enhancement"
+   - GOOD tags: "ui-layout", "auth-flow", "api-validation", "css-flexbox", "react-hooks"
 
 Respond ONLY with valid JSON:
-{"title": "...", "summary": "...", "type": "...", "tags": ["..."]}`;
+{"intent": "task-execution", "title": "...", "summary": "...", "type": "...", "tags": ["..."]}`;
 
     const aiResponse = await askAI(s, prompt);
 
-    let parsed: { title: string; summary: string; type: MemoryType; tags: string[] };
+    let parsed: { intent?: string; title: string; summary: string; type: MemoryType; tags: string[] };
     const json = extractJSON(aiResponse);
     if (json?.title) {
         parsed = json;
+        s.log(`[code-buddy] 🧠 AI classified intent: ${parsed.intent || "unknown"}`);
     } else {
-        const toolNames = [...new Set(buf.map((o) => o.tool))];
+        // Fallback: use file names for meaningful tags instead of raw tool names
+        const editedFiles = [...new Set(buf.filter((o) => o.fileEdited).map((o) => o.fileEdited as string))];
+        const fileNames = editedFiles
+            .map((f) => f.split("/").pop()?.replace(/\.[^.]+$/, "") || "")
+            .filter(Boolean);
+        const tags = fileNames.length > 0
+            ? fileNames.slice(0, 3)
+            : [...new Set(buf.map((o) => o.tool))].slice(0, 3);
         parsed = {
-            title: `Session: ${toolNames.slice(0, 3).join(", ")}`,
-            summary: `Used ${buf.length} tools: ${toolNames.join(", ")}`,
+            title: editedFiles.length > 0
+                ? `Edit ${fileNames.slice(0, 2).join(", ")}`
+                : `Session: ${[...new Set(buf.map((o) => o.tool))].slice(0, 3).join(", ")}`,
+            summary: editedFiles.length > 0
+                ? `Edited ${editedFiles.length} file(s): ${editedFiles.join(", ")}`
+                : `Used ${buf.length} tool calls across the session`,
             type: "note",
-            tags: ["auto-observed", ...toolNames.slice(0, 3)],
+            tags: ["auto-observed", ...tags],
         };
     }
 
