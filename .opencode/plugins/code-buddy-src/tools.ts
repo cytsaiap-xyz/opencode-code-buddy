@@ -32,12 +32,12 @@ export function createTools(s: PluginState) {
         // ========================================
 
         buddy_config: tool({
-            description: "View or update LLM provider configuration",
+            description: "View or update plugin configuration (LLM, verbose, etc.)",
             args: {
-                action: tool.schema.string().optional().describe("Action: view, set_provider, set_model"),
-                value: tool.schema.string().optional().describe("Value for the setting"),
+                action: tool.schema.string().optional().describe("Action: view, set_provider, set_model, set_verbose"),
+                value: tool.schema.string().optional().describe("Value for the setting (for set_verbose: true/false)"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 const action = args.action || "view";
 
                 if (action === "view") {
@@ -66,12 +66,16 @@ export function createTools(s: PluginState) {
                         `| Preferred Model | ${s.config.llm.preferredModel || "(auto)"} |`,
                         `| Max Tokens | ${s.config.llm.maxTokens} |`,
                         `| Temperature | ${s.config.llm.temperature} |`,
+                        `\n### Features`,
+                        `| Feature | Value |\n|---------|-------|`,
+                        `| Verbose | ${s.config.features.verbose !== false ? "✅ on" : "❌ off"} |`,
                         `\n### Config File`,
                         `\`${s.configPath}\``,
                         `\n### How to Configure`,
                         `1. Set provider in \`opencode.json\` → auto-detected`,
                         `2. Or use: \`buddy_config("set_provider", "nvidia")\``,
                         `3. Or use: \`buddy_config("set_model", "moonshotai/kimi-k2.5")\``,
+                        `4. Or use: \`buddy_config("set_verbose", "false")\` to silence status logs`,
                     ].join("\n");
                 }
 
@@ -90,7 +94,14 @@ export function createTools(s: PluginState) {
                     return `✅ Preferred model set to: ${args.value}`;
                 }
 
-                return `❌ Unknown action: ${action}\n\nAvailable actions: view, set_provider, set_model`;
+                if (action === "set_verbose") {
+                    const enabled = args.value !== "false" && args.value !== "off" && args.value !== "0";
+                    s.config.features.verbose = enabled;
+                    saveConfig(s.configPath, s.config);
+                    return `✅ Verbose ${enabled ? "enabled" : "disabled"}\n\nPlugin status logs are now ${enabled ? "on" : "off"}.`;
+                }
+
+                return `❌ Unknown action: ${action}\n\nAvailable actions: view, set_provider, set_model, set_verbose`;
             },
         }),
 
@@ -103,7 +114,7 @@ export function createTools(s: PluginState) {
             args: {
                 provider: tool.schema.string().optional().describe("Specific provider ID to test (tests all if omitted)"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 let output = `## 🔌 LLM Provider Test\n\n`;
 
                 try {
@@ -182,7 +193,7 @@ export function createTools(s: PluginState) {
             args: {
                 command: tool.schema.string().optional().describe("Specific command name"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 if (args.command) {
                     return `## 📖 Help for ${args.command}\n\nUse buddy_help() without arguments to see all commands.`;
                 }
@@ -244,7 +255,7 @@ export function createTools(s: PluginState) {
                 execute: tool.schema.boolean().optional().describe("Set true to execute the task using AI (default: false)"),
                 context: tool.schema.string().optional().describe("Additional context (code, file paths, etc.)"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 const taskType = detectTaskType(args.task);
                 const complexity = estimateComplexity(args.task);
 
@@ -300,7 +311,7 @@ Be concise but thorough. If this involves code, provide the actual code.`);
                 learnings: tool.schema.string().optional().describe("Key learnings or insights from this task"),
                 type: tool.schema.string().optional().describe("Memory type: decision, bugfix, lesson, pattern, feature, note (default: feature)"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 const memType = (VALID_MEMORY_TYPES.includes(args.type as MemoryType) ? args.type : "feature") as MemoryType;
                 const category = MEMORY_TYPE_CATEGORY[memType] || "knowledge";
 
@@ -345,7 +356,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                 limit: tool.schema.number().optional().describe("Max results (default: 5)"),
                 type: tool.schema.string().optional().describe("Filter by type"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 let results = searchText(s.memories, args.query, ["title", "content", "tags"]);
                 if (args.type) results = results.filter((m) => m.type === args.type);
                 results = results.slice(0, args.limit || 5);
@@ -365,7 +376,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
             args: {
                 limit: tool.schema.number().optional().describe("Number of results (default: 5)"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 const recent = [...s.memories].sort((a, b) => b.timestamp - a.timestamp).slice(0, args.limit || 5);
                 if (recent.length === 0) return "📜 No memories yet. Use `buddy_do` to start!";
 
@@ -384,7 +395,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                 limit: tool.schema.number().optional().describe("Number of results (default: 10)"),
                 query: tool.schema.string().optional().describe("Optional search query within category"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 const cat = args.category.toLowerCase() as MemoryCategory;
                 if (!["solution", "knowledge"].includes(cat)) {
                     return `❌ Invalid category: "${args.category}". Use 'solution' or 'knowledge'.`;
@@ -449,7 +460,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                 tags: tool.schema.array(tool.schema.string()).optional().describe("Tags"),
                 forceSave: tool.schema.boolean().optional().describe("Set true to save even if similar memory exists"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 const tags = (args.tags && args.tags.length > 0)
                     ? args.tags
                     : await autoGenerateTags(s, args.title, args.content, args.type);
@@ -485,7 +496,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                 type: tool.schema.string().optional().describe("Delete all memories of this type"),
                 confirmCode: tool.schema.string().optional().describe("Confirmation code from step 1 to execute deletion"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 // Step 2: Execute
                 if (args.confirmCode) {
                     if (!s.pendingDeletion) {
@@ -568,7 +579,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                 observations: tool.schema.array(tool.schema.string()).describe("Observations/facts"),
                 tags: tool.schema.array(tool.schema.string()).optional().describe("Tags"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 const entity: Entity = {
                     id: generateId("entity"),
                     name: args.name,
@@ -580,7 +591,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                 s.entities.push(entity);
                 s.saveEntities();
                 s.session.memoriesCreated++;
-                return `✅ Entity created: **${args.name}**\n\nType: ${args.type}\nObservations:\n${args.observations.map((o) => `- ${o}`).join("\n")}`;
+                return `✅ Entity created: **${args.name}**\n\nType: ${args.type}\nObservations:\n${args.observations.map((o: string) => `- ${o}`).join("\n")}`;
             },
         }),
 
@@ -590,7 +601,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                 query: tool.schema.string().describe("Search query"),
                 limit: tool.schema.number().optional().describe("Max results (default: 10)"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 const results = searchText(s.entities, args.query, ["name", "observations", "tags"]).slice(0, args.limit || 10);
                 if (results.length === 0) return `🔍 No entities found for "${args.query}"`;
 
@@ -610,7 +621,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                 type: tool.schema.string().describe("Type: depends_on, implements, related_to, caused_by, fixed_by, uses, extends"),
                 description: tool.schema.string().optional().describe("Description"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 const fromEntity = s.entities.find((e) => e.name === args.from);
                 const toEntity = s.entities.find((e) => e.name === args.to);
                 if (!fromEntity || !toEntity) {
@@ -645,7 +656,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                 preventionMethod: tool.schema.string().describe("Prevention method"),
                 relatedRule: tool.schema.string().optional().describe("Related rule"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 const record: MistakeRecord = {
                     id: generateId("mistake"),
                     timestamp: Date.now(),
@@ -697,7 +708,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                 testsPassing: tool.schema.boolean().optional().describe("Tests passing?"),
                 hasLintErrors: tool.schema.boolean().optional().describe("Lint errors?"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 s.session.currentPhase = args.phase;
                 s.session.lastActivity = Date.now();
 
@@ -757,7 +768,7 @@ ${warnings.length > 0 ? `### ⚠️ Warnings\n${warnings.join("\n")}` : ""}`;
             args: {
                 prompt: tool.schema.string().describe("Question or prompt for the AI"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 const response = await askAI(s, args.prompt);
 
                 const entry: MemoryEntry = {
@@ -781,7 +792,7 @@ ${warnings.length > 0 ? `### ⚠️ Warnings\n${warnings.join("\n")}` : ""}`;
                 code: tool.schema.string().describe("Code to analyze"),
                 focus: tool.schema.string().optional().describe("Focus area: bugs, performance, security, readability, or general"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 const focus = args.focus || "general";
                 const response = await askAI(s, `Analyze the following code with focus on ${focus}:\n\n\`\`\`\n${args.code}\n\`\`\`\n\nProvide:\n1. Summary\n2. Issues found\n3. Suggestions for improvement`);
                 return `## 🔍 Code Analysis (${focus})\n\n${response}`;
@@ -794,7 +805,7 @@ ${warnings.length > 0 ? `### ⚠️ Warnings\n${warnings.join("\n")}` : ""}`;
                 context: tool.schema.string().describe("Current context or problem description"),
                 type: tool.schema.string().optional().describe("Type: code, architecture, workflow, documentation"),
             },
-            async execute(args) {
+            async execute(args: any) {
                 const type = args.type || "general";
                 const relevant = searchText(s.memories, args.context, ["title", "content"]).slice(0, 3);
                 const memCtx = relevant.length > 0

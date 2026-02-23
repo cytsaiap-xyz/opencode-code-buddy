@@ -37,7 +37,7 @@ export function createHooks(s: PluginState) {
             const protectedPatterns = [".env", ".env.local", ".env.production", "secrets"];
             for (const pattern of protectedPatterns) {
                 if (filePath.includes(pattern)) {
-                    console.log(`[code-buddy] ⚠️ Protected file access blocked: ${filePath}`);
+                    s.log(`[code-buddy] ⚠️ Protected file access blocked: ${filePath}`);
                     throw new Error(`[Code Buddy] Access to protected file "${filePath}" is blocked. Set config.hooks.protectEnv = false to disable.`);
                 }
             }
@@ -97,7 +97,7 @@ export function createHooks(s: PluginState) {
             output.context.push(block);
 
             const total = recentMemories.length + recentMistakes.length + topEntities.length;
-            console.log(`[code-buddy] 📦 Injected ${total} items into compaction context`);
+            s.log(`[code-buddy] 📦 Injected ${total} items into compaction context`);
         },
     };
 }
@@ -119,7 +119,7 @@ function handleFileEdited(s: PluginState, properties?: Record<string, unknown>):
         content: `Edited file: ${filePath}`,
         tags: ["auto-tracked", "file-edit"],
     }, false);
-    console.log(`[code-buddy] 📝 Tracked file edit: ${filePath}`);
+    s.log(`[code-buddy] 📝 Tracked file edit: ${filePath}`);
 }
 
 async function handleSessionIdle(s: PluginState): Promise<void> {
@@ -127,7 +127,7 @@ async function handleSessionIdle(s: PluginState): Promise<void> {
 
     // Reminder (only when NOT in fullAuto mode)
     if (s.config.hooks.autoRemind && !s.config.hooks.fullAuto && s.session.tasksCompleted > 0) {
-        console.log(`[code-buddy] 💡 Reminder: ${s.session.tasksCompleted} task(s) completed. Use buddy_done to record results.`);
+        s.log(`[code-buddy] 💡 Reminder: ${s.session.tasksCompleted} task(s) completed. Use buddy_done to record results.`);
     }
 
     // Auto-observer
@@ -140,7 +140,7 @@ async function handleSessionIdle(s: PluginState): Promise<void> {
             await processSingleSummaryObserver(s);
         }
     } catch (err) {
-        console.log("[code-buddy] Observer error:", err);
+        s.log("[code-buddy] Observer error:", err);
     }
 
     s.clearObservations();
@@ -253,11 +253,11 @@ Respond ONLY with a valid JSON array:
             });
             s.saveMistakes();
             s.session.errorsRecorded++;
-            console.log(`[code-buddy] ⚠️ Auto-detected error: ${entry.title}`);
+            s.log(`[code-buddy] ⚠️ Auto-detected error: ${entry.title}`);
         }
     }
 
-    console.log(`[code-buddy] 🤖 Full Auto: saved ${savedCount} entries from ${buf.length} observations`);
+    s.log(`[code-buddy] 🤖 Full Auto: saved ${savedCount} entries from ${buf.length} observations`);
 }
 
 // ---- Single summary mode ----
@@ -313,5 +313,5 @@ Respond ONLY with valid JSON:
         tags: [...(parsed.tags || []), "auto-observed"],
     }, false);
 
-    console.log(`[code-buddy] 🔍 Observer: ${result.message} (from ${buf.length} observations)`);
+    s.log(`[code-buddy] 🔍 Observer: ${result.message} (from ${buf.length} observations)`);
 }

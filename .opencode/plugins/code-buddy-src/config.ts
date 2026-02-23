@@ -22,6 +22,7 @@ export const defaultConfig: PluginConfig = {
         errorLearning: true,
         workflow: true,
         ai: true,
+        verbose: true,
     },
     hooks: {
         autoRemind: true,
@@ -55,12 +56,15 @@ function deepMerge(target: Record<string, unknown>, source: Record<string, unkno
     return result;
 }
 
-export function loadConfig(configPath: string): PluginConfig {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type LogFn = (...args: any[]) => void;
+
+export function loadConfig(configPath: string, log: LogFn = console.log): PluginConfig {
     try {
         if (fs.existsSync(configPath)) {
             const loaded = JSON.parse(fs.readFileSync(configPath, "utf-8"));
             const merged = deepMerge(defaultConfig as unknown as Record<string, unknown>, loaded) as unknown as PluginConfig;
-            console.log("[code-buddy] Config loaded from", configPath);
+            log("[code-buddy] Config loaded from", configPath);
             return merged;
         }
         // Create default config
@@ -69,9 +73,9 @@ export function loadConfig(configPath: string): PluginConfig {
             fs.mkdirSync(dir, { recursive: true });
         }
         fs.writeFileSync(configPath, JSON.stringify(defaultConfig, null, 4), "utf-8");
-        console.log("[code-buddy] Default config created at", configPath);
+        log("[code-buddy] Default config created at", configPath);
     } catch (error) {
-        console.log("[code-buddy] Error loading config:", error);
+        log("[code-buddy] Error loading config:", error);
     }
     return { ...defaultConfig };
 }

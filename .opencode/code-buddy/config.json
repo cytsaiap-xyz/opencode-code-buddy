@@ -13,7 +13,8 @@
         "knowledgeGraph": true,
         "errorLearning": true,
         "workflow": true,
-        "ai": true
+        "ai": true,
+        "verbose": true
     },
     "hooks": {
         "autoRemind": true,
