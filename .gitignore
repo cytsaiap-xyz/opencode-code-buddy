@@ -17,5 +17,5 @@ Thumbs.db
 dist/
 *.js.map
 
-# Data files (local storage)
-.opencode/data/
+# Runtime data
+data/
