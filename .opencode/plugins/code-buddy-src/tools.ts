@@ -12,7 +12,6 @@ import { saveConfig } from "./config";
 import {
     generateId, generateConfirmCode, searchText,
     getMemoryCategory, detectTaskType, estimateComplexity,
-    compactOutput,
     TASK_STEPS, WORKFLOW_STEPS, WORKFLOW_PROGRESS,
 } from "./helpers";
 import {
@@ -20,27 +19,6 @@ import {
     addMemoryWithDedup, autoGenerateTags,
 } from "./llm";
 import type { PluginState } from "./state";
-
-// ============================================
-// Visualization wrapper
-// ============================================
-
-/**
- * Wraps a tool definition so its output is compacted (emojis, markdown
- * decoration, tables, progress bars stripped) when `features.verbose` is false.
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function vizTool(s: PluginState, config: any) {
-    const origExecute = config.execute;
-    return tool({
-        ...config,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        async execute(args: any) {
-            const result: string = await origExecute(args);
-            return s.config.features.verbose !== false ? result : compactOutput(result);
-        },
-    });
-}
 
 // ============================================
 // Factory — returns an object of all tools
@@ -53,7 +31,7 @@ export function createTools(s: PluginState) {
         // CONFIG
         // ========================================
 
-        buddy_config: vizTool(s, {
+        buddy_config: tool({
             description: "View or update plugin configuration (LLM, verbose, etc.)",
             args: {
                 action: tool.schema.string().optional().describe("Action: view, set_provider, set_model, set_verbose"),
@@ -97,7 +75,7 @@ export function createTools(s: PluginState) {
                         `1. Set provider in \`opencode.json\` → auto-detected`,
                         `2. Or use: \`buddy_config("set_provider", "nvidia")\``,
                         `3. Or use: \`buddy_config("set_model", "moonshotai/kimi-k2.5")\``,
-                        `4. Or use: \`buddy_config("set_verbose", "false")\` to disable emojis`,
+                        `4. Or use: \`buddy_config("set_verbose", "false")\` to silence status logs`,
                     ].join("\n");
                 }
 
@@ -120,7 +98,7 @@ export function createTools(s: PluginState) {
                     const enabled = args.value !== "false" && args.value !== "off" && args.value !== "0";
                     s.config.features.verbose = enabled;
                     saveConfig(s.configPath, s.config);
-                    return `✅ Verbose ${enabled ? "enabled" : "disabled"}\n\nEmoji decorations in tool output are now ${enabled ? "on" : "off"}.`;
+                    return `✅ Verbose ${enabled ? "enabled" : "disabled"}\n\nPlugin status logs are now ${enabled ? "on" : "off"}.`;
                 }
 
                 return `❌ Unknown action: ${action}\n\nAvailable actions: view, set_provider, set_model, set_verbose`;
@@ -131,7 +109,7 @@ export function createTools(s: PluginState) {
         // LLM TEST
         // ========================================
 
-        buddy_llm_test: vizTool(s, {
+        buddy_llm_test: tool({
             description: "Test LLM provider connectivity. Lists all available providers and verifies API connection.",
             args: {
                 provider: tool.schema.string().optional().describe("Specific provider ID to test (tests all if omitted)"),
@@ -210,7 +188,7 @@ export function createTools(s: PluginState) {
         // HELP
         // ========================================
 
-        buddy_help: vizTool(s, {
+        buddy_help: tool({
             description: "Display help for all buddy commands",
             args: {
                 command: tool.schema.string().optional().describe("Specific command name"),
@@ -270,7 +248,7 @@ export function createTools(s: PluginState) {
         // TASK EXECUTION
         // ========================================
 
-        buddy_do: vizTool(s, {
+        buddy_do: tool({
             description: "Execute a development task - analyzes, records, and optionally executes the task using AI",
             args: {
                 task: tool.schema.string().describe("Task description"),
@@ -325,7 +303,7 @@ Be concise but thorough. If this involves code, provide the actual code.`);
             },
         }),
 
-        buddy_done: vizTool(s, {
+        buddy_done: tool({
             description: "Record a completed task with results and learnings",
             args: {
                 task: tool.schema.string().describe("What task was completed"),
@@ -371,7 +349,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
         // MEMORY
         // ========================================
 
-        buddy_remember: vizTool(s, {
+        buddy_remember: tool({
             description: "Search project memories",
             args: {
                 query: tool.schema.string().describe("Search query"),
@@ -393,7 +371,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
             },
         }),
 
-        buddy_remember_recent: vizTool(s, {
+        buddy_remember_recent: tool({
             description: "Get recent memories",
             args: {
                 limit: tool.schema.number().optional().describe("Number of results (default: 5)"),
@@ -410,7 +388,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
             },
         }),
 
-        buddy_remember_by_category: vizTool(s, {
+        buddy_remember_by_category: tool({
             description: "Get memories filtered by category (solution or knowledge)",
             args: {
                 category: tool.schema.string().describe("Category: 'solution' (decision, bugfix, lesson) or 'knowledge' (pattern, feature, note)"),
@@ -440,7 +418,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
             },
         }),
 
-        buddy_remember_stats: vizTool(s, {
+        buddy_remember_stats: tool({
             description: "Get memory and knowledge graph statistics",
             args: {},
             async execute() {
@@ -473,7 +451,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
             },
         }),
 
-        buddy_add_memory: vizTool(s, {
+        buddy_add_memory: tool({
             description: "Add a memory entry with automatic deduplication. If similar memory exists, will try to merge or ask to confirm",
             args: {
                 title: tool.schema.string().describe("Memory title"),
@@ -510,7 +488,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
             },
         }),
 
-        buddy_delete_memory: vizTool(s, {
+        buddy_delete_memory: tool({
             description: "Delete memories with two-step confirmation. First call shows what will be deleted, second call with confirmCode executes deletion",
             args: {
                 query: tool.schema.string().optional().describe("Search query to find memories to delete"),
@@ -593,7 +571,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
         // KNOWLEDGE GRAPH
         // ========================================
 
-        buddy_create_entity: vizTool(s, {
+        buddy_create_entity: tool({
             description: "Create a knowledge entity",
             args: {
                 name: tool.schema.string().describe("Entity name"),
@@ -617,7 +595,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
             },
         }),
 
-        buddy_search_entities: vizTool(s, {
+        buddy_search_entities: tool({
             description: "Search knowledge entities",
             args: {
                 query: tool.schema.string().describe("Search query"),
@@ -635,7 +613,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
             },
         }),
 
-        buddy_create_relation: vizTool(s, {
+        buddy_create_relation: tool({
             description: "Create a relationship between entities",
             args: {
                 from: tool.schema.string().describe("Source entity"),
@@ -667,7 +645,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
         // ERROR LEARNING
         // ========================================
 
-        buddy_record_mistake: vizTool(s, {
+        buddy_record_mistake: tool({
             description: "Record an AI mistake for learning",
             args: {
                 action: tool.schema.string().describe("Wrong action taken"),
@@ -697,7 +675,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
             },
         }),
 
-        buddy_get_mistake_patterns: vizTool(s, {
+        buddy_get_mistake_patterns: tool({
             description: "Get error pattern analysis",
             args: {},
             async execute() {
@@ -722,7 +700,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
         // WORKFLOW
         // ========================================
 
-        buddy_get_workflow_guidance: vizTool(s, {
+        buddy_get_workflow_guidance: tool({
             description: "Get workflow guidance for current phase",
             args: {
                 phase: tool.schema.string().describe("Phase: idle, planning, implementing, code-written, testing, reviewing, commit-ready, deploying, completed"),
@@ -751,7 +729,7 @@ ${(WORKFLOW_STEPS[args.phase] || WORKFLOW_STEPS.idle).join("\n")}`;
             },
         }),
 
-        buddy_get_session_health: vizTool(s, {
+        buddy_get_session_health: tool({
             description: "Check session health",
             args: {},
             async execute() {
@@ -785,7 +763,7 @@ ${warnings.length > 0 ? `### ⚠️ Warnings\n${warnings.join("\n")}` : ""}`;
         // AI FEATURES
         // ========================================
 
-        buddy_ask_ai: vizTool(s, {
+        buddy_ask_ai: tool({
             description: "Ask AI using OpenCode's current LLM for any question or analysis",
             args: {
                 prompt: tool.schema.string().describe("Question or prompt for the AI"),
@@ -808,7 +786,7 @@ ${warnings.length > 0 ? `### ⚠️ Warnings\n${warnings.join("\n")}` : ""}`;
             },
         }),
 
-        buddy_analyze_code: vizTool(s, {
+        buddy_analyze_code: tool({
             description: "Use AI to analyze code and provide insights",
             args: {
                 code: tool.schema.string().describe("Code to analyze"),
@@ -821,7 +799,7 @@ ${warnings.length > 0 ? `### ⚠️ Warnings\n${warnings.join("\n")}` : ""}`;
             },
         }),
 
-        buddy_suggest_improvements: vizTool(s, {
+        buddy_suggest_improvements: tool({
             description: "Use AI to suggest improvements for current context",
             args: {
                 context: tool.schema.string().describe("Current context or problem description"),

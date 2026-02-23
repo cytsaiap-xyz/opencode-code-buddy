@@ -89,4 +89,14 @@ export class PluginState {
     clearObservations(): void {
         this.observationBuffer.length = 0;
     }
+
+    // ---- Logging (respects verbose flag) ----
+
+    /** Log to console only when verbose is enabled. */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    log(...args: any[]): void {
+        if (this.config.features.verbose !== false) {
+            console.log(...args);
+        }
+    }
 }

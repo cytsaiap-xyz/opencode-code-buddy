@@ -46,10 +46,10 @@ export async function resolveProvider(s: PluginState): Promise<ProviderInfo | nu
             name: target.name || target.id,
         };
 
-        console.log(`[code-buddy] Resolved provider: ${s.resolvedProvider.name} (${s.resolvedProvider.modelID})`);
+        s.log(`[code-buddy] Resolved provider: ${s.resolvedProvider.name} (${s.resolvedProvider.modelID})`);
         return s.resolvedProvider;
     } catch (error) {
-        console.log("[code-buddy] Error resolving provider:", error);
+        s.log("[code-buddy] Error resolving provider:", error);
         return null;
     }
 }
@@ -94,10 +94,10 @@ export async function askAI(s: PluginState, prompt: string): Promise<string> {
                     return data.choices[0].message.content;
                 }
             } else {
-                console.log(`[code-buddy] LLM API error: ${response.status} ${response.statusText}`);
+                s.log(`[code-buddy] LLM API error: ${response.status} ${response.statusText}`);
             }
         } catch (error) {
-            console.log("[code-buddy] LLM API call error:", error);
+            s.log("[code-buddy] LLM API call error:", error);
         }
     }
 
@@ -165,7 +165,7 @@ Respond in JSON only:
             };
         }
     } catch (error) {
-        console.log("[code-buddy] Semantic similarity error:", error);
+        s.log("[code-buddy] Semantic similarity error:", error);
     }
     return { similar: false, score: 0, reason: "Parse error" };
 }
@@ -202,7 +202,7 @@ export async function findSimilarMemories(
             const result = await checkSemanticSimilarity(s, combined, `${m.title} ${m.content}`);
             if (result.similar && result.score >= LLM_SIMILARITY_THRESHOLD) {
                 llmMatches.push(m);
-                console.log(`[code-buddy] LLM found similar: ${m.title} (${result.score}, ${result.reason})`);
+                s.log(`[code-buddy] LLM found similar: ${m.title} (${result.score}, ${result.reason})`);
             }
         }
         if (llmMatches.length > 0) {
@@ -239,7 +239,7 @@ Respond in JSON format only:
         const parsed = extractJSON(response);
         if (parsed?.title && parsed.content) return parsed;
     } catch (error) {
-        console.log("[code-buddy] Merge error:", error);
+        s.log("[code-buddy] Merge error:", error);
     }
 
     // Fallback: simple concatenation

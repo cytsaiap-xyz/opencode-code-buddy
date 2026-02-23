@@ -20,12 +20,15 @@ export const CodeBuddyPlugin: Plugin = async (ctx) => {
     const configPath = path.join(globalBase, "config.json");
 
     const config = loadConfig(configPath);
-    const storage = new LocalStorage(path.join(globalBase, "data"));
+    // Create a verbose-aware log for early subsystems (before state exists)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const log = (...args: any[]) => { if (config.features.verbose !== false) console.log(...args); };
+    const storage = new LocalStorage(path.join(globalBase, "data"), log);
     const state = new PluginState(storage, config, configPath, client);
 
-    // Log initial status (non-blocking)
+    // Log initial status (non-blocking, respects verbose)
     getLLMStatus(state).then((status) =>
-        console.log(`[code-buddy] Plugin initialized - LLM: ${status}`),
+        state.log(`[code-buddy] Plugin initialized - LLM: ${status}`),
     );
 
     return {
