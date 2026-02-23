@@ -6,7 +6,7 @@
  *  - experimental.session.compacting (context injection)
  */
 
-import type { MemoryType, ErrorType } from "./types";
+import type { MemoryType, ErrorType, Observation } from "./types";
 import { MEMORY_TYPE_CATEGORY, VALID_MEMORY_TYPES } from "./types";
 import { generateId } from "./helpers";
 import { askAI, addMemoryWithDedup, extractJSON, extractJSONArray } from "./llm";
@@ -27,6 +27,97 @@ const WRITE_TOOL_PATTERNS = [
 function isWriteTool(toolName: string): boolean {
     const lower = toolName.toLowerCase();
     return WRITE_TOOL_PATTERNS.some((p) => lower.includes(p));
+}
+
+// ============================================
+// Session intent classification
+// ============================================
+
+type SessionIntent = "task-execution" | "debugging" | "refactoring" | "exploration";
+
+interface SessionSignals {
+    total: number;
+    writeRatio: number;
+    errorRatio: number;
+    /** How concentrated edits are on the same files (0–1, higher = same files repeatedly). */
+    fileRepeatScore: number;
+    /** Unique edited files / total write observations (0–1, higher = spread across many files). */
+    fileDiversity: number;
+    /** Whether reads generally precede writes in the buffer. */
+    readThenWrite: boolean;
+    uniqueEditedFiles: number;
+    intent: SessionIntent;
+}
+
+function computeSessionSignals(buf: Observation[]): SessionSignals {
+    const total = buf.length;
+    const writes = buf.filter((o) => o.isWriteAction);
+    const errors = buf.filter((o) => o.hasError);
+    const writeRatio = total > 0 ? writes.length / total : 0;
+    const errorRatio = total > 0 ? errors.length / total : 0;
+
+    // File repeat: count how many times each edited file appears
+    const fileCounts: Record<string, number> = {};
+    for (const o of buf) {
+        if (o.fileEdited) fileCounts[o.fileEdited] = (fileCounts[o.fileEdited] || 0) + 1;
+    }
+    const uniqueFiles = Object.keys(fileCounts);
+    const totalFileRefs = Object.values(fileCounts).reduce((a, b) => a + b, 0);
+    const fileRepeatScore = uniqueFiles.length > 0 && totalFileRefs > 0
+        ? 1 - (uniqueFiles.length / totalFileRefs)
+        : 0;
+    const fileDiversity = writes.length > 0 ? uniqueFiles.length / writes.length : 0;
+
+    // Read-then-write: check if the first write comes after at least one read
+    const firstWriteIdx = buf.findIndex((o) => o.isWriteAction);
+    const firstReadIdx = buf.findIndex((o) => !o.isWriteAction);
+    const readThenWrite = firstReadIdx >= 0 && firstWriteIdx > firstReadIdx;
+
+    // Classify intent
+    let intent: SessionIntent;
+    if (errorRatio >= 0.3 || (errors.length >= 2 && fileRepeatScore >= 0.5)) {
+        intent = "debugging";
+    } else if (writeRatio >= 0.5 && fileDiversity >= 0.6 && uniqueFiles.length >= 3) {
+        intent = "refactoring";
+    } else if (writeRatio <= 0.15 && errors.length === 0) {
+        intent = "exploration";
+    } else {
+        intent = "task-execution";
+    }
+
+    return {
+        total, writeRatio, errorRatio, fileRepeatScore,
+        fileDiversity, readThenWrite, uniqueEditedFiles: uniqueFiles.length, intent,
+    };
+}
+
+/** Build a short context block the AI can use to focus its analysis. */
+function buildIntentHint(sig: SessionSignals): string {
+    const pct = (n: number) => `${Math.round(n * 100)}%`;
+    const lines: string[] = [
+        `Session signals: ${sig.total} actions, ${pct(sig.writeRatio)} writes, ${pct(sig.errorRatio)} errors, ${sig.uniqueEditedFiles} unique file(s) edited`,
+    ];
+
+    switch (sig.intent) {
+        case "debugging":
+            lines.push("Intent: DEBUGGING — errors detected or same files revisited repeatedly.");
+            lines.push("Focus on: what went wrong, what was tried, what fixed it. Prefer type \"bugfix\" or \"lesson\".");
+            break;
+        case "refactoring":
+            lines.push("Intent: REFACTORING — many files edited with a similar pattern.");
+            lines.push("Focus on: what pattern was applied across files, why. Prefer type \"pattern\" or \"decision\".");
+            break;
+        case "exploration":
+            lines.push("Intent: EXPLORATION — mostly reads, no errors, minimal edits.");
+            lines.push("Focus on: what was being investigated, key findings. Prefer type \"note\" or \"lesson\".");
+            break;
+        case "task-execution":
+            lines.push("Intent: TASK EXECUTION — focused work with reads then writes.");
+            lines.push("Focus on: what was built or changed, the end result. Prefer type \"feature\" or \"bugfix\".");
+            break;
+    }
+
+    return lines.join("\n");
 }
 
 // ============================================
@@ -194,6 +285,8 @@ async function processFullAutoObserver(s: PluginState): Promise<void> {
     const buf = s.observationBuffer;
     const hasErrors = buf.some((o) => o.hasError);
     const editedFiles = [...new Set(buf.filter((o) => o.fileEdited).map((o) => o.fileEdited))];
+    const signals = computeSessionSignals(buf);
+    const intentHint = buildIntentHint(signals);
 
     const observationSummary = buf.map((o) => {
         const time = new Date(o.timestamp).toLocaleTimeString();
@@ -203,7 +296,11 @@ async function processFullAutoObserver(s: PluginState): Promise<void> {
         return `[${time}] ${o.tool}${argsStr}${o.result ? `\n  → ${o.result}` : ""}${o.hasError ? " ❌ ERROR" : ""}`;
     }).join("\n");
 
+    s.log(`[code-buddy] 🧠 Intent: ${signals.intent} (writes=${Math.round(signals.writeRatio * 100)}%, errors=${Math.round(signals.errorRatio * 100)}%, files=${signals.uniqueEditedFiles})`);
+
     const prompt = `You are a development observer AI analyzing a coding session. Produce a JSON ARRAY of memory entries.
+
+${intentHint}
 
 Observations:
 ${observationSummary}
@@ -223,6 +320,7 @@ Rules:
 10. **Tags must be specific and descriptive.** Use the actual domain concepts from the code, NOT generic labels.
     - BAD tags: "code-change", "file-edit", "update", "enhancement", "modification"
     - GOOD tags: "ui-layout", "auth-flow", "api-validation", "css-flexbox", "react-hooks", "db-migration"
+11. Use the session intent above to guide your focus and preferred memory types.
 
 Respond ONLY with a valid JSON array:
 [{"category": "task", "title": "...", "summary": "...", "type": "feature", "tags": ["..."]}, ...]`;
@@ -313,6 +411,8 @@ Respond ONLY with a valid JSON array:
 
 async function processSingleSummaryObserver(s: PluginState): Promise<void> {
     const buf = s.observationBuffer;
+    const signals = computeSessionSignals(buf);
+    const intentHint = buildIntentHint(signals);
 
     const observationSummary = buf.map((o) => {
         const time = new Date(o.timestamp).toLocaleTimeString();
@@ -322,14 +422,18 @@ async function processSingleSummaryObserver(s: PluginState): Promise<void> {
         return `[${time}] ${o.tool}${argsStr}${o.result ? `\n  → ${o.result}` : ""}${o.hasError ? " ❌ ERROR" : ""}`;
     }).join("\n");
 
+    s.log(`[code-buddy] 🧠 Intent: ${signals.intent} (writes=${Math.round(signals.writeRatio * 100)}%, errors=${Math.round(signals.errorRatio * 100)}%, files=${signals.uniqueEditedFiles})`);
+
     const prompt = `You are a development observer AI. Analyze the following tool usage observations and produce a single JSON summary that merges all related work into one cohesive entry.
+
+${intentHint}
 
 Observations:
 ${observationSummary}
 
 Rules:
 1. Summarize the overall intent of the session in 1-2 sentences. Merge related actions (e.g. multiple edits to the same area) into one description.
-2. Choose the best memory type: "decision", "pattern", "bugfix", "lesson", "feature", or "note"
+2. Choose the best memory type based on the session intent above: "decision", "pattern", "bugfix", "lesson", "feature", or "note"
 3. Create a concise title (max 60 chars) that captures the high-level goal, not individual steps.
 4. Generate 3-5 specific, descriptive tags using actual domain concepts from the code.
    - BAD tags: "code-change", "file-edit", "update", "enhancement"
