@@ -22,7 +22,7 @@ export const defaultConfig: PluginConfig = {
         errorLearning: true,
         workflow: true,
         ai: true,
-        visualization: true,
+        verbose: true,
     },
     hooks: {
         autoRemind: true,

@@ -37,7 +37,7 @@ function vizTool(s: PluginState, config: any) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         async execute(args: any) {
             const result: string = await origExecute(args);
-            return s.config.features.visualization !== false ? result : stripEmojis(result);
+            return s.config.features.verbose !== false ? result : stripEmojis(result);
         },
     });
 }
@@ -54,10 +54,10 @@ export function createTools(s: PluginState) {
         // ========================================
 
         buddy_config: vizTool(s, {
-            description: "View or update plugin configuration (LLM, visualization, etc.)",
+            description: "View or update plugin configuration (LLM, verbose, etc.)",
             args: {
-                action: tool.schema.string().optional().describe("Action: view, set_provider, set_model, set_visualization"),
-                value: tool.schema.string().optional().describe("Value for the setting (for set_visualization: true/false)"),
+                action: tool.schema.string().optional().describe("Action: view, set_provider, set_model, set_verbose"),
+                value: tool.schema.string().optional().describe("Value for the setting (for set_verbose: true/false)"),
             },
             async execute(args: any) {
                 const action = args.action || "view";
@@ -90,14 +90,14 @@ export function createTools(s: PluginState) {
                         `| Temperature | ${s.config.llm.temperature} |`,
                         `\n### Features`,
                         `| Feature | Value |\n|---------|-------|`,
-                        `| Visualization | ${s.config.features.visualization !== false ? "✅ on" : "❌ off"} |`,
+                        `| Verbose | ${s.config.features.verbose !== false ? "✅ on" : "❌ off"} |`,
                         `\n### Config File`,
                         `\`${s.configPath}\``,
                         `\n### How to Configure`,
                         `1. Set provider in \`opencode.json\` → auto-detected`,
                         `2. Or use: \`buddy_config("set_provider", "nvidia")\``,
                         `3. Or use: \`buddy_config("set_model", "moonshotai/kimi-k2.5")\``,
-                        `4. Or use: \`buddy_config("set_visualization", "false")\` to disable emojis`,
+                        `4. Or use: \`buddy_config("set_verbose", "false")\` to disable emojis`,
                     ].join("\n");
                 }
 
@@ -116,14 +116,14 @@ export function createTools(s: PluginState) {
                     return `✅ Preferred model set to: ${args.value}`;
                 }
 
-                if (action === "set_visualization") {
+                if (action === "set_verbose") {
                     const enabled = args.value !== "false" && args.value !== "off" && args.value !== "0";
-                    s.config.features.visualization = enabled;
+                    s.config.features.verbose = enabled;
                     saveConfig(s.configPath, s.config);
-                    return `✅ Visualization ${enabled ? "enabled" : "disabled"}\n\nEmoji decorations in tool output are now ${enabled ? "on" : "off"}.`;
+                    return `✅ Verbose ${enabled ? "enabled" : "disabled"}\n\nEmoji decorations in tool output are now ${enabled ? "on" : "off"}.`;
                 }
 
-                return `❌ Unknown action: ${action}\n\nAvailable actions: view, set_provider, set_model, set_visualization`;
+                return `❌ Unknown action: ${action}\n\nAvailable actions: view, set_provider, set_model, set_verbose`;
             },
         }),
 

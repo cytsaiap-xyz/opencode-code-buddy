@@ -131,7 +131,7 @@ export interface PluginConfig {
         errorLearning: boolean;
         workflow: boolean;
         ai: boolean;
-        visualization: boolean;
+        verbose: boolean;
     };
     hooks: {
         autoRemind: boolean;
