@@ -13,6 +13,23 @@ import { askAI, addMemoryWithDedup, extractJSON, extractJSONArray } from "./llm"
 import type { PluginState } from "./state";
 
 // ============================================
+// Write-action detection for observation filter
+// ============================================
+
+/** Tool name patterns that indicate a write / mutating action. */
+const WRITE_TOOL_PATTERNS = [
+    "edit", "write", "create", "delete", "remove", "move", "rename",
+    "bash", "shell", "terminal", "exec", "run",
+    "insert", "replace", "patch", "apply",
+];
+
+/** Returns true if the tool name looks like a write/mutating action. */
+function isWriteTool(toolName: string): boolean {
+    const lower = toolName.toLowerCase();
+    return WRITE_TOOL_PATTERNS.some((p) => lower.includes(p));
+}
+
+// ============================================
 // Factory — returns all hook handlers
 // ============================================
 
@@ -57,13 +74,17 @@ export function createHooks(s: PluginState) {
 
             const meta = output.metadata || {};
 
+            const fileEdited = (meta.filePath || meta.path || meta.file) as string | undefined;
+            const isWriteAction = isWriteTool(input.tool) || !!fileEdited;
+
             s.pushObservation({
                 timestamp: Date.now(),
                 tool: input.tool,
                 args: meta,
                 result: outputStr.substring(0, 200),
                 hasError,
-                fileEdited: (meta.filePath || meta.path || meta.file) as string | undefined,
+                fileEdited,
+                isWriteAction,
             });
         },
 
@@ -132,6 +153,18 @@ async function handleSessionIdle(s: PluginState): Promise<void> {
 
     // Auto-observer
     if (!s.config.hooks.autoObserve || s.observationBuffer.length < s.config.hooks.observeMinActions) return;
+
+    // Action-type filter: skip recording for read-only sessions (unless errors detected)
+    if (s.config.hooks.requireEditForRecord) {
+        const hasWriteAction = s.observationBuffer.some((o) => o.isWriteAction);
+        const hasErrors = s.observationBuffer.some((o) => o.hasError);
+
+        if (!hasWriteAction && !hasErrors) {
+            s.log("[code-buddy] 📖 Read-only session detected, skipping auto-record");
+            s.clearObservations();
+            return;
+        }
+    }
 
     try {
         if (s.config.hooks.fullAuto) {

@@ -37,6 +37,7 @@ export const defaultConfig: PluginConfig = {
         ],
         fullAuto: true,
         autoErrorDetect: true,
+        requireEditForRecord: true,
     },
 };
 
