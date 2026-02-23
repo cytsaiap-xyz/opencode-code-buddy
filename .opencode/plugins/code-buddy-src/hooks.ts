@@ -211,7 +211,7 @@ ${hasErrors ? "\n⚠️ Some observations contain errors." : ""}
 ${editedFiles.length > 0 ? `\n📝 Files edited: ${editedFiles.join(", ")}` : ""}
 
 Rules:
-1. Analyze ALL observations and classify into one or more entries
+1. **MERGE related actions into a single entry.** Multiple edits to the same component, file area, or logical concern (e.g. three style tweaks to one UI component) MUST become one entry, not three. Group by intent, not by individual tool call.
 2. Each entry must have a "category" field: "task", "decision", "error", or "pattern"
 3. For "task": what was being worked on (type: "feature", "bugfix", or "note")
 4. For "decision": any architectural or technical choice made (type: "decision")
@@ -219,7 +219,10 @@ Rules:
 6. For "pattern": any reusable coding pattern observed (type: "pattern")
 7. Each entry needs: category, title (max 60 chars), summary (1-2 sentences), type, tags (3-5 lowercase hyphenated)
 8. For "error" entries, add "errorInfo": {"pattern": "...", "solution": "...", "prevention": "..."}
-9. Output 1-4 entries. Don't create entries for trivial observations.
+9. Output 1-3 entries. Fewer is better. Don't create entries for trivial observations.
+10. **Tags must be specific and descriptive.** Use the actual domain concepts from the code, NOT generic labels.
+    - BAD tags: "code-change", "file-edit", "update", "enhancement", "modification"
+    - GOOD tags: "ui-layout", "auth-flow", "api-validation", "css-flexbox", "react-hooks", "db-migration"
 
 Respond ONLY with a valid JSON array:
 [{"category": "task", "title": "...", "summary": "...", "type": "feature", "tags": ["..."]}, ...]`;
@@ -237,23 +240,36 @@ Respond ONLY with a valid JSON array:
     }
 
     if (entries.length === 0) {
-        // Rule-based fallback
-        const toolNames = [...new Set(buf.map((o) => o.tool))];
+        // Rule-based fallback — group by edited files for meaningful tags
+        const fileNames = editedFiles
+            .map((f) => (f as string).split("/").pop()?.replace(/\.[^.]+$/, "") || "")
+            .filter(Boolean);
+        const fileTags = fileNames.length > 0
+            ? fileNames.slice(0, 3)
+            : [...new Set(buf.map((o) => o.tool))].slice(0, 3);
+
+        const title = editedFiles.length > 0
+            ? `Edit ${fileNames.slice(0, 2).join(", ")}${fileNames.length > 2 ? ` +${fileNames.length - 2}` : ""}`
+            : `Session: ${[...new Set(buf.map((o) => o.tool))].slice(0, 3).join(", ")}`;
+
         entries = [{
             category: "task",
-            title: `Session: ${toolNames.slice(0, 3).join(", ")}`,
-            summary: `Used ${buf.length} tools: ${toolNames.join(", ")}`,
+            title,
+            summary: editedFiles.length > 0
+                ? `Edited ${editedFiles.length} file(s): ${editedFiles.join(", ")}`
+                : `Used ${buf.length} tool calls across the session`,
             type: "note",
-            tags: ["auto-observed", ...toolNames.slice(0, 3)],
+            tags: ["auto-observed", ...fileTags],
         }];
         if (hasErrors) {
             const errorObs = buf.filter((o) => o.hasError);
+            const errorFile = errorObs[0]?.fileEdited?.split("/").pop() || errorObs[0]?.tool || "unknown";
             entries.push({
                 category: "error",
-                title: `Error in ${errorObs[0]?.tool || "unknown"}`,
+                title: `Error in ${errorFile}`,
                 summary: errorObs.map((o) => o.result || "").join("; ").substring(0, 200),
                 type: "bugfix",
-                tags: ["auto-error", errorObs[0]?.tool || "unknown"],
+                tags: ["auto-error", errorFile.replace(/\.[^.]+$/, "")],
             });
         }
     }
@@ -306,16 +322,18 @@ async function processSingleSummaryObserver(s: PluginState): Promise<void> {
         return `[${time}] ${o.tool}${argsStr}${o.result ? `\n  → ${o.result}` : ""}${o.hasError ? " ❌ ERROR" : ""}`;
     }).join("\n");
 
-    const prompt = `You are a development observer AI. Analyze the following tool usage observations and produce a JSON summary.
+    const prompt = `You are a development observer AI. Analyze the following tool usage observations and produce a single JSON summary that merges all related work into one cohesive entry.
 
 Observations:
 ${observationSummary}
 
 Rules:
-1. Summarize what was accomplished in 1-2 sentences
+1. Summarize the overall intent of the session in 1-2 sentences. Merge related actions (e.g. multiple edits to the same area) into one description.
 2. Choose the best memory type: "decision", "pattern", "bugfix", "lesson", "feature", or "note"
-3. Generate 3-5 relevant tags (lowercase, no spaces, use hyphens)
-4. Create a concise title (max 60 chars)
+3. Create a concise title (max 60 chars) that captures the high-level goal, not individual steps.
+4. Generate 3-5 specific, descriptive tags using actual domain concepts from the code.
+   - BAD tags: "code-change", "file-edit", "update", "enhancement"
+   - GOOD tags: "ui-layout", "auth-flow", "api-validation", "css-flexbox", "react-hooks"
 
 Respond ONLY with valid JSON:
 {"title": "...", "summary": "...", "type": "...", "tags": ["..."]}`;
@@ -327,12 +345,23 @@ Respond ONLY with valid JSON:
     if (json?.title) {
         parsed = json;
     } else {
-        const toolNames = [...new Set(buf.map((o) => o.tool))];
+        // Fallback: use file names for meaningful tags instead of raw tool names
+        const editedFiles = [...new Set(buf.filter((o) => o.fileEdited).map((o) => o.fileEdited as string))];
+        const fileNames = editedFiles
+            .map((f) => f.split("/").pop()?.replace(/\.[^.]+$/, "") || "")
+            .filter(Boolean);
+        const tags = fileNames.length > 0
+            ? fileNames.slice(0, 3)
+            : [...new Set(buf.map((o) => o.tool))].slice(0, 3);
         parsed = {
-            title: `Session: ${toolNames.slice(0, 3).join(", ")}`,
-            summary: `Used ${buf.length} tools: ${toolNames.join(", ")}`,
+            title: editedFiles.length > 0
+                ? `Edit ${fileNames.slice(0, 2).join(", ")}`
+                : `Session: ${[...new Set(buf.map((o) => o.tool))].slice(0, 3).join(", ")}`,
+            summary: editedFiles.length > 0
+                ? `Edited ${editedFiles.length} file(s): ${editedFiles.join(", ")}`
+                : `Used ${buf.length} tool calls across the session`,
             type: "note",
-            tags: ["auto-observed", ...toolNames.slice(0, 3)],
+            tags: ["auto-observed", ...tags],
         };
     }
 
