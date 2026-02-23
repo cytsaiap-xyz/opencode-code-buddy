@@ -1,31 +1,26 @@
 {
-    "name": "code-buddy-mcp",
-    "version": "3.0.0",
-    "description": "Code Buddy MCP Server - Project Memory, Knowledge Graph, Error Learning, Workflow Guidance",
+    "name": "opencode-code-buddy",
+    "version": "2.0.0",
+    "description": "AI Development Assistant Plugin - Project Memory, Knowledge Graph, Smart Task Execution, Full Auto Observer (Fully Offline)",
     "type": "module",
-    "main": "dist/index.js",
-    "bin": {
-        "code-buddy-mcp": "dist/index.js"
-    },
+    "main": ".opencode/plugins/code-buddy.ts",
     "scripts": {
-        "build": "tsc",
-        "start": "node dist/index.js",
-        "dev": "tsc --watch"
+        "install": "bash install.sh"
     },
     "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.12.1",
+        "@opencode-ai/plugin": "latest",
         "zod": "^3.23.0"
     },
     "devDependencies": {
-        "@types/node": "^22.0.0",
-        "typescript": "^5.7.0"
+        "typescript": "^5.0.0"
     },
     "keywords": [
-        "mcp",
+        "opencode",
+        "plugin",
         "code-buddy",
         "memory",
         "knowledge-graph",
-        "error-learning",
+        "auto-observer",
         "offline"
     ],
     "license": "MIT"
