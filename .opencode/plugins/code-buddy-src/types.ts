@@ -112,6 +112,7 @@ export interface ProviderInfo {
     baseURL: string;
     apiKey: string;
     name: string;
+    headers?: Record<string, string>;
 }
 
 // ---- Config ----

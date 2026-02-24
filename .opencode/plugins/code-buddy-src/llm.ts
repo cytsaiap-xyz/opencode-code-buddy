@@ -2,6 +2,9 @@
  * LLM provider resolution, AI calls, and memory deduplication/merge.
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
 import type { MemoryEntry, MemoryType, ProviderInfo, DedupResult } from "./types";
 import { MEMORY_TYPE_CATEGORY } from "./types";
 import { calculateSimilarity, generateId } from "./helpers";
@@ -11,47 +14,139 @@ import type { PluginState } from "./state";
 // Provider Resolution
 // ============================================
 
-export async function resolveProvider(s: PluginState): Promise<ProviderInfo | null> {
-    if (s.resolvedProvider) return s.resolvedProvider;
-
+/**
+ * Read the first provider from an opencode.json file.
+ * Returns null if the file doesn't exist or has no providers.
+ */
+function readProviderFromOpenCodeJson(filePath: string, s: PluginState): ProviderInfo | null {
     try {
-        const result = await s.client.config.providers();
-        if (!result.data) return null;
+        if (!fs.existsSync(filePath)) return null;
 
-        const providers = result.data.providers || [];
-        if (providers.length === 0) return null;
+        const raw = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+        const providerMap = raw.provider;
+        if (!providerMap || typeof providerMap !== "object") return null;
 
-        let target: any = null;
-        if (s.config.llm.preferredProvider) {
-            target = providers.find((p: any) => p.id === s.config.llm.preferredProvider);
+        const providerIds = Object.keys(providerMap);
+        if (providerIds.length === 0) return null;
+
+        // Pick preferred provider if configured, otherwise first available
+        let targetId = providerIds[0];
+        if (s.config.llm.preferredProvider && providerIds.includes(s.config.llm.preferredProvider)) {
+            targetId = s.config.llm.preferredProvider;
         }
-        if (!target) target = providers[0];
-        if (!target) return null;
 
-        const modelKeys = Object.keys(target.models || {});
+        const cfg = providerMap[targetId];
+        if (!cfg) return null;
+
+        const modelKeys = Object.keys(cfg.models || {});
         let modelID = "";
         if (s.config.llm.preferredModel && modelKeys.includes(s.config.llm.preferredModel)) {
             modelID = s.config.llm.preferredModel;
         } else if (modelKeys.length > 0) {
             modelID = modelKeys[0];
-        } else {
-            return null;
         }
 
-        s.resolvedProvider = {
-            providerID: target.id,
-            modelID,
-            baseURL: String(target.options?.baseURL || target.options?.baseUrl || ""),
-            apiKey: String(target.key || target.options?.apiKey || ""),
-            name: target.name || target.id,
-        };
+        // Also check the top-level "model" field (format: "provider/model")
+        if (!modelID && raw.model && typeof raw.model === "string") {
+            const parts = raw.model.split("/");
+            if (parts.length === 2 && parts[0] === targetId) {
+                modelID = parts[1];
+            } else if (parts.length === 2 && !providerIds.includes(parts[0])) {
+                // model field references a different provider; skip
+            } else if (parts.length === 1) {
+                modelID = parts[0];
+            }
+        }
 
-        s.log(`[code-buddy] Resolved provider: ${s.resolvedProvider.name} (${s.resolvedProvider.modelID})`);
-        return s.resolvedProvider;
+        if (!modelID) return null;
+
+        const baseURL = String(cfg.options?.baseURL || cfg.options?.baseUrl || cfg.api || "");
+        const apiKey = String(cfg.options?.apiKey || "");
+        const headers: Record<string, string> | undefined =
+            cfg.options?.headers && typeof cfg.options.headers === "object"
+                ? cfg.options.headers as Record<string, string>
+                : undefined;
+
+        if (!baseURL && !apiKey) return null;
+
+        s.log(`[code-buddy] Resolved provider from ${filePath}: ${cfg.name || targetId} (${modelID})`);
+        return {
+            providerID: cfg.id || targetId,
+            modelID,
+            baseURL,
+            apiKey,
+            name: cfg.name || targetId,
+            headers,
+        };
     } catch (error) {
-        s.log("[code-buddy] Error resolving provider:", error);
+        s.log(`[code-buddy] Error reading ${filePath}:`, error);
         return null;
     }
+}
+
+export async function resolveProvider(s: PluginState): Promise<ProviderInfo | null> {
+    if (s.resolvedProvider) return s.resolvedProvider;
+
+    // Step 1: Try the OpenCode SDK client API
+    try {
+        const result = await s.client.config.providers();
+        if (result.data) {
+            const providers = result.data.providers || [];
+            if (providers.length > 0) {
+                let target: any = null;
+                if (s.config.llm.preferredProvider) {
+                    target = providers.find((p: any) => p.id === s.config.llm.preferredProvider);
+                }
+                if (!target) target = providers[0];
+
+                if (target) {
+                    const modelKeys = Object.keys(target.models || {});
+                    let modelID = "";
+                    if (s.config.llm.preferredModel && modelKeys.includes(s.config.llm.preferredModel)) {
+                        modelID = s.config.llm.preferredModel;
+                    } else if (modelKeys.length > 0) {
+                        modelID = modelKeys[0];
+                    }
+
+                    if (modelID) {
+                        const hdrs = target.options?.headers;
+                        s.resolvedProvider = {
+                            providerID: target.id,
+                            modelID,
+                            baseURL: String(target.options?.baseURL || target.options?.baseUrl || ""),
+                            apiKey: String(target.key || target.options?.apiKey || ""),
+                            name: target.name || target.id,
+                            headers: hdrs && typeof hdrs === "object" ? hdrs : undefined,
+                        };
+
+                        s.log(`[code-buddy] Resolved provider: ${s.resolvedProvider.name} (${s.resolvedProvider.modelID})`);
+                        return s.resolvedProvider;
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        s.log("[code-buddy] SDK provider resolution failed, trying opencode.json:", error);
+    }
+
+    // Step 2: Try opencode.json in current working directory
+    const localConfig = path.join(process.cwd(), "opencode.json");
+    const fromLocal = readProviderFromOpenCodeJson(localConfig, s);
+    if (fromLocal) {
+        s.resolvedProvider = fromLocal;
+        return s.resolvedProvider;
+    }
+
+    // Step 3: Try ~/.config/opencode/opencode.json
+    const globalConfig = path.join(os.homedir(), ".config", "opencode", "opencode.json");
+    const fromGlobal = readProviderFromOpenCodeJson(globalConfig, s);
+    if (fromGlobal) {
+        s.resolvedProvider = fromGlobal;
+        return s.resolvedProvider;
+    }
+
+    s.log("[code-buddy] No LLM provider found (SDK, local opencode.json, or global opencode.json)");
+    return null;
 }
 
 export async function isLLMAvailable(s: PluginState): Promise<boolean> {
@@ -79,6 +174,7 @@ export async function askAI(s: PluginState, prompt: string): Promise<string> {
                 headers: {
                     "Content-Type": "application/json",
                     Authorization: `Bearer ${provider.apiKey}`,
+                    ...(provider.headers || {}),
                 },
                 body: JSON.stringify({
                     model: provider.modelID,
