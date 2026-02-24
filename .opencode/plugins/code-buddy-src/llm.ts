@@ -7,7 +7,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import type { MemoryEntry, MemoryType, ProviderInfo, DedupResult } from "./types";
 import { MEMORY_TYPE_CATEGORY } from "./types";
-import { calculateSimilarity, generateId } from "./helpers";
+import { calculateSimilarity, generateId, nowTimestamp } from "./helpers";
 import type { PluginState } from "./state";
 
 // ============================================
@@ -359,7 +359,7 @@ export async function addMemoryWithDedup(
     const similar = similarResult.matches;
 
     if (similar.length === 0 || forceSave) {
-        const newEntry: MemoryEntry = { ...entry, id: generateId("mem"), timestamp: Date.now() };
+        const newEntry: MemoryEntry = { ...entry, id: generateId("mem"), timestamp: nowTimestamp() };
         s.memories.push(newEntry);
         s.saveMemories();
         s.session.memoriesCreated++;
@@ -373,7 +373,7 @@ export async function addMemoryWithDedup(
         if (idx >= 0) {
             s.memories[idx].title = merged.title;
             s.memories[idx].content = merged.content;
-            s.memories[idx].timestamp = Date.now();
+            s.memories[idx].timestamp = nowTimestamp();
             s.memories[idx].tags = [...new Set([...s.memories[idx].tags, ...entry.tags])];
             s.saveMemories();
             return {

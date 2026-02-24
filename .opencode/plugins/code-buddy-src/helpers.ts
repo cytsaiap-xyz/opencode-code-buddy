@@ -70,15 +70,25 @@ export function calculateSimilarity(text1: string, text2: string): number {
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+/** Return current time as ISO 8601 string for storage, e.g. "2026-02-24T15:45:00.123Z" */
+export function nowTimestamp(): string {
+    return new Date().toISOString();
+}
+
+/** Parse a timestamp (ISO string or legacy numeric ms) into a Date */
+function parseTS(ts: string | number): Date {
+    return typeof ts === "number" ? new Date(ts) : new Date(ts);
+}
+
 /** Format timestamp as human-readable date, e.g. "Feb 24, 2026" */
-export function formatDate(ts: number): string {
-    const d = new Date(ts);
+export function formatDate(ts: string | number): string {
+    const d = parseTS(ts);
     return `${MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
 }
 
 /** Format timestamp as human-readable date+time, e.g. "Feb 24, 2026 3:45 PM" */
-export function formatDateTime(ts: number): string {
-    const d = new Date(ts);
+export function formatDateTime(ts: string | number): string {
+    const d = parseTS(ts);
     const h = d.getHours();
     const m = d.getMinutes().toString().padStart(2, "0");
     const ampm = h >= 12 ? "PM" : "AM";
@@ -87,8 +97,8 @@ export function formatDateTime(ts: number): string {
 }
 
 /** Format timestamp as human-readable time, e.g. "3:45 PM" */
-export function formatTime(ts: number): string {
-    const d = new Date(ts);
+export function formatTime(ts: string | number): string {
+    const d = parseTS(ts);
     const h = d.getHours();
     const m = d.getMinutes().toString().padStart(2, "0");
     const ampm = h >= 12 ? "PM" : "AM";

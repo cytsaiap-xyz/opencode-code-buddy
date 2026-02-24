@@ -11,7 +11,7 @@ import { MEMORY_TYPE_CATEGORY, VALID_MEMORY_TYPES } from "./types";
 import {
     generateId, generateConfirmCode, searchText,
     getMemoryCategory, detectTaskType, estimateComplexity,
-    formatDate, formatDateTime,
+    formatDate, formatDateTime, nowTimestamp,
     TASK_STEPS, WORKFLOW_STEPS, WORKFLOW_PROGRESS,
 } from "./helpers";
 import {
@@ -363,7 +363,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                 limit: tool.schema.number().optional().describe("Number of results (default: 5)"),
             },
             async execute(args: any) {
-                const recent = [...s.memories].sort((a, b) => b.timestamp - a.timestamp).slice(0, args.limit || 5);
+                const recent = [...s.memories].sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, args.limit || 5);
                 if (recent.length === 0) return "📜 No memories yet. Use `buddy_do` to start!";
 
                 let msg = `## 📜 Recent Memories (${recent.length})\n\n`;
@@ -389,7 +389,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
 
                 let filtered = cat === "solution" ? s.getSolutionMemories() : s.getKnowledgeMemories();
                 if (args.query) filtered = searchText(filtered, args.query, ["title", "content", "tags"]);
-                filtered = filtered.sort((a, b) => b.timestamp - a.timestamp).slice(0, args.limit || 10);
+                filtered = filtered.sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, args.limit || 10);
 
                 if (filtered.length === 0) {
                     return `📂 No ${cat} memories found${args.query ? ` matching "${args.query}"` : ""}.`;
@@ -491,7 +491,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                     if (args.confirmCode !== s.pendingDeletion.confirmCode) {
                         return `❌ Invalid confirmation code.\n\nExpected: \`${s.pendingDeletion.confirmCode}\`\nReceived: \`${args.confirmCode}\`\n\nPlease use the exact code provided.`;
                     }
-                    if (Date.now() - s.pendingDeletion.timestamp > 5 * 60 * 1000) {
+                    if (Date.now() - new Date(s.pendingDeletion.timestamp).getTime() > 5 * 60 * 1000) {
                         s.pendingDeletion = null;
                         return `❌ Deletion request expired (5 minute timeout). Please start over.`;
                     }
@@ -532,7 +532,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                     type: "memory",
                     ids: itemsToDelete.map((i) => i.id),
                     items: itemsToDelete,
-                    timestamp: Date.now(),
+                    timestamp: nowTimestamp(),
                     confirmCode: code,
                 };
 
@@ -572,7 +572,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                     type: args.type as EntityType,
                     observations: args.observations,
                     tags: args.tags || [],
-                    createdAt: Date.now(),
+                    createdAt: nowTimestamp(),
                 };
                 s.entities.push(entity);
                 s.saveEntities();
@@ -619,7 +619,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                     to: args.to,
                     type: args.type,
                     description: args.description,
-                    createdAt: Date.now(),
+                    createdAt: nowTimestamp(),
                 };
                 s.relations.push(rel);
                 s.saveRelations();
@@ -645,7 +645,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
             async execute(args: any) {
                 const record: MistakeRecord = {
                     id: generateId("mistake"),
-                    timestamp: Date.now(),
+                    timestamp: nowTimestamp(),
                     action: args.action,
                     errorType: args.errorType as ErrorType,
                     userCorrection: args.userCorrection,
@@ -763,7 +763,7 @@ ${warnings.length > 0 ? `### ⚠️ Warnings\n${warnings.join("\n")}` : ""}`;
                     title: `AI Q: ${args.prompt.substring(0, 40)}...`,
                     content: `Q: ${args.prompt}\n\nA: ${response}`,
                     tags: ["ai-query"],
-                    timestamp: Date.now(),
+                    timestamp: nowTimestamp(),
                 };
                 s.memories.push(entry);
                 s.saveMemories();
