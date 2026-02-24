@@ -270,8 +270,8 @@ Respond in JSON only:
 // Deduplication & Merge
 // ============================================
 
-const JACCARD_THRESHOLD = 0.35;
-const LLM_SIMILARITY_THRESHOLD = 0.6;
+const JACCARD_THRESHOLD = 0.55;
+const LLM_SIMILARITY_THRESHOLD = 0.7;
 
 export async function findSimilarMemories(
     s: PluginState,
@@ -314,34 +314,43 @@ async function mergeMemoriesWithAI(
     existing: MemoryEntry,
     newContent: { title: string; content: string },
 ): Promise<{ title: string; content: string }> {
-    const prompt = `You are a memory consolidation assistant. Merge these two related memories into one concise, comprehensive entry.
+    const prompt = `Merge these two related memories into one concise entry. The merged title must be specific and descriptive (max 60 chars). The merged content must combine concrete details from both, removing duplicates.
 
-EXISTING MEMORY:
+EXISTING:
 Title: ${existing.title}
 Content: ${existing.content}
 
-NEW MEMORY:
+NEW:
 Title: ${newContent.title}
 Content: ${newContent.content}
 
-Respond in JSON format only:
-{
-  "title": "merged title (max 60 chars)",
-  "content": "merged content (combine key points, remove duplicates)"
-}`;
+Rules:
+- The title MUST describe the actual work (e.g. "Snake game: canvas rendering with neon theme"). Never use generic text.
+- The content MUST contain specific details — file names, functions, CSS properties, etc.
+- Do NOT repeat the word "merged" or any instructions in your output.
+
+Respond with ONLY a JSON object containing "title" and "content" keys.`;
 
     try {
         const response = await askAI(s, prompt);
         const parsed = extractJSON(response);
-        if (parsed?.title && parsed.content) return parsed;
+        if (parsed?.title && parsed.content) {
+            // Guard against LLM echoing template/placeholder text
+            const badPatterns = /^merged (title|content)|max \d+ chars|combine key points|remove duplicates/i;
+            if (badPatterns.test(parsed.title) || badPatterns.test(parsed.content)) {
+                s.log("[code-buddy] LLM returned template text in merge — using fallback");
+            } else {
+                return parsed;
+            }
+        }
     } catch (error) {
         s.log("[code-buddy] Merge error:", error);
     }
 
-    // Fallback: simple concatenation
+    // Fallback: prefer the new content's title (more specific/recent)
     return {
-        title: newContent.title,
-        content: `${existing.content}\n\n---\n[Updated] ${newContent.content}`,
+        title: newContent.title.substring(0, 60),
+        content: `${newContent.content}\n\n[Previous] ${existing.content.substring(0, 200)}`,
     };
 }
 

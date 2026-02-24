@@ -44,14 +44,25 @@ export function getMemoryCategory(memory: MemoryEntry): MemoryCategory {
 
 // ---- Similarity ----
 
-/** Jaccard similarity on word sets (words > 2 chars). */
+/**
+ * Jaccard similarity on word sets (words > 2 chars).
+ * Excludes auto-observer noise words that cause unrelated sessions to match.
+ */
+const SIMILARITY_STOP_WORDS = new Set([
+    "auto", "observed", "task", "error", "bash", "read", "write", "edit",
+    "glob", "grep", "skill", "session", "used", "tools", "file", "files",
+    "the", "and", "for", "with", "from", "that", "this", "are", "was",
+    "merged", "title", "content", "max", "chars", "combine", "key",
+    "points", "remove", "duplicates",
+]);
+
 export function calculateSimilarity(text1: string, text2: string): number {
     const toWords = (t: string) =>
         new Set(
             t.toLowerCase()
                 .replace(/[^\w\s]/g, "")
                 .split(/\s+/)
-                .filter((w) => w.length > 2),
+                .filter((w) => w.length > 2 && !SIMILARITY_STOP_WORDS.has(w)),
         );
 
     const a = toWords(text1);

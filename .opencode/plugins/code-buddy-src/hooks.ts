@@ -6,6 +6,7 @@
  *  - experimental.session.compacting (context injection)
  */
 
+import * as fs from "node:fs";
 import type { MemoryType, ErrorType, Observation } from "./types";
 import { MEMORY_TYPE_CATEGORY, VALID_MEMORY_TYPES } from "./types";
 import { generateId, formatTime, nowTimestamp } from "./helpers";
@@ -34,11 +35,51 @@ function isWriteTool(toolName: string): boolean {
 // ============================================
 
 export function createHooks(s: PluginState) {
+    // Track flush state: "idle" → "started" → "completed"
+    let flushState: "idle" | "started" | "completed" = "idle";
+
+    const flushObservations = async (reason: string) => {
+        if (flushState !== "idle" || s.observationBuffer.length === 0) return;
+        flushState = "started";
+        s.log(`[code-buddy] 📤 Flushing observations (${reason}, ${s.observationBuffer.length} buffered)`);
+        try {
+            await handleSessionIdle(s);
+            flushState = "completed";
+            s.log(`[code-buddy] ✅ Async flush completed (${reason})`);
+        } catch (err) {
+            s.log(`[code-buddy] ❌ Async flush failed (${reason}):`, err);
+            // Fall back to sync save so we don't lose data
+            try { flushObservationsSync(s); } catch { /* best effort */ }
+            flushState = "completed";
+        }
+    };
+
+    // Safety net: flush on process exit (covers `opencode run` where
+    // session.idle async work may not complete before process terminates)
+    const onExit = () => {
+        if (flushState === "completed") return; // async flush finished — nothing to do
+        if (s.observationBuffer.length < s.config.hooks.observeMinActions) return;
+
+        s.log(`[code-buddy] 📤 Process exiting (flushState=${flushState}) — sync saving ${s.observationBuffer.length} observations`);
+        try {
+            flushObservationsSync(s);
+        } catch (err) {
+            s.log("[code-buddy] Sync flush error:", err);
+        }
+    };
+    process.on("beforeExit", onExit);
+    process.on("exit", onExit);
+
     return {
-        // ---- event: session.idle ----
+        // ---- event: session lifecycle ----
         event: async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
             if (event.type === "session.idle") {
-                await handleSessionIdle(s);
+                flushState = "idle"; // reset for next idle cycle
+                await flushObservations("session.idle");
+            }
+            // Also flush when session ends (covers `opencode run`)
+            if (event.type === "session.deleted") {
+                await flushObservations("session.deleted");
             }
         },
 
@@ -57,7 +98,7 @@ export function createHooks(s: PluginState) {
         },
 
         // ---- tool.execute.after: background observer ----
-        "tool.execute.after": async (input: { tool: string }, output: { output: string; metadata: any }) => {
+        "tool.execute.after": async (input: { tool: string; args?: any }, output: { title?: string; output: string; metadata: any }) => {
             if (!s.config.hooks.autoObserve) return;
 
             const ignoreList = s.config.hooks.observeIgnoreTools || [];
@@ -69,8 +110,18 @@ export function createHooks(s: PluginState) {
             const hasError = s.config.hooks.autoErrorDetect && errorPatterns.test(outputStr);
 
             const meta = output.metadata || {};
+            const inputArgs = input.args || {};
 
-            const fileEdited = (meta.filePath || meta.path || meta.file) as string | undefined;
+            // Extract file path from multiple sources (metadata, input args, title)
+            let fileEdited = (meta.filePath || meta.path || meta.file
+                || inputArgs.filePath || inputArgs.file_path || inputArgs.path) as string | undefined;
+
+            // Also try to extract from the title (e.g. "Write index.html", "Edit src/foo.ts")
+            if (!fileEdited && output.title) {
+                const titleMatch = output.title.match(/(?:Write|Edit|Create|Read)\s+(.+)/i);
+                if (titleMatch) fileEdited = titleMatch[1].trim();
+            }
+
             const isWriteAction = isWriteTool(input.tool) || !!fileEdited;
 
             // Capture more context for write/edit operations (code content is the valuable part)
@@ -79,12 +130,14 @@ export function createHooks(s: PluginState) {
             s.pushObservation({
                 timestamp: nowTimestamp(),
                 tool: input.tool,
-                args: meta,
+                args: { ...meta, ...inputArgs },
                 result: outputStr.substring(0, resultLimit),
                 hasError,
                 fileEdited,
                 isWriteAction,
             });
+
+            s.log(`[code-buddy] 👁️ Observed: ${input.tool}${fileEdited ? ` → ${fileEdited}` : ""}${isWriteAction ? " [write]" : ""} (title: ${output.title || "none"})`);
         },
 
         // ---- session.compacting: inject memories/mistakes/entities into context ----
@@ -465,14 +518,16 @@ Respond ONLY with valid JSON:
     for (const entry of entries.slice(0, 4)) {
         if (!VALID_MEMORY_TYPES.includes(entry.type)) entry.type = "note";
 
-        await addMemoryWithDedup(s, {
+        const result = await addMemoryWithDedup(s, {
             type: entry.type,
             category: MEMORY_TYPE_CATEGORY[entry.type],
             title: entry.title,
             content: entry.summary,
             tags: [...new Set([...(entry.tags || []), "auto-observed", `auto-${entry.category}`])],
         }, false);
-        savedCount++;
+
+        s.log(`[code-buddy] 📝 Dedup result: ${result.action} — ${result.message}`);
+        if (result.action === "created" || result.action === "merged") savedCount++;
 
         // Auto-record errors to mistakes.json
         if (entry.category === "error" && s.config.hooks.autoErrorDetect && entry.errorInfo) {
@@ -562,4 +617,267 @@ Respond ONLY with valid JSON:
     }, false);
 
     s.log(`[code-buddy] 🔍 Observer: ${result.message} (from ${buf.length} observations)`);
+}
+
+// ---- Synchronous fallback flush for process exit ----
+
+/**
+ * Synchronous best-effort flush using rule-based classification only (no AI).
+ * Used in process exit handlers where async operations cannot complete.
+ *
+ * Reads created/edited files from disk to extract a structured project guide
+ * that can help an AI agent recreate or extend the project later.
+ */
+function flushObservationsSync(s: PluginState): void {
+    const buf = s.observationBuffer;
+    if (buf.length < s.config.hooks.observeMinActions) return;
+
+    // Check requireEditForRecord gate
+    if (s.config.hooks.requireEditForRecord) {
+        const hasWriteAction = buf.some((o) => o.isWriteAction);
+        const hasErrors = buf.some((o) => o.hasError);
+        if (!hasWriteAction && !hasErrors) return;
+    }
+
+    const editedFiles = [...new Set(buf.filter((o) => o.fileEdited).map((o) => o.fileEdited as string))];
+    if (editedFiles.length === 0) return;
+
+    // Read actual file contents from disk to extract knowledge
+    const fileAnalyses: string[] = [];
+    const allTags: string[] = [];
+
+    for (const filePath of editedFiles) {
+        try {
+            const content = fs.readFileSync(filePath, "utf-8");
+            const analysis = analyzeFileContent(filePath, content);
+            if (analysis.summary) fileAnalyses.push(analysis.summary);
+            allTags.push(...analysis.tags);
+        } catch {
+            // File might have been deleted or moved
+        }
+    }
+
+    if (fileAnalyses.length === 0) return;
+
+    // Build title from project context
+    const projectName = extractProjectName(buf, editedFiles);
+    const fileNames = editedFiles.map((f) => f.split("/").pop() || f);
+    const title = projectName
+        ? `${projectName} (${fileNames.join(", ")})`.substring(0, 60)
+        : `Build ${fileNames.join(", ")}`.substring(0, 60);
+
+    // Combine all file analyses into a structured guide
+    const guide = [
+        `## Project: ${projectName || fileNames.join(", ")}`,
+        `Files: ${editedFiles.join(", ")}`,
+        "",
+        ...fileAnalyses,
+    ].join("\n").substring(0, 2000);
+
+    const tags = [...new Set([...inferTags(buf, editedFiles), ...allTags])].slice(0, 8);
+
+    s.memories.push({
+        id: generateId("mem"),
+        type: "feature" as MemoryType,
+        category: "knowledge",
+        title,
+        content: guide,
+        tags: [...new Set([...tags, "auto-observed", "project-guide"])],
+        timestamp: nowTimestamp(),
+    } as MemoryEntry);
+
+    s.saveMemories();
+    s.clearObservations();
+    s.log(`[code-buddy] 📤 Sync flush: saved project guide "${title}"`);
+}
+
+// ---- File analysis helpers for sync flush ----
+
+/** Try to extract a human-readable project name from observations. */
+function extractProjectName(buf: Observation[], editedFiles: string[]): string {
+    // Check todo/task descriptions in observation results
+    for (const o of buf) {
+        if (!o.result) continue;
+        // Look for task descriptions like "Build a Flappy Bird clone"
+        const taskMatch = o.result.match(/(?:Build|Create|Implement|Make)\s+(?:a\s+)?(.{5,40?})(?:\s+in\s+|\s+clone|\s+game)/i);
+        if (taskMatch) return taskMatch[1].trim();
+    }
+
+    // Try HTML <title> from files
+    for (const f of editedFiles) {
+        if (f.endsWith(".html")) {
+            try {
+                const content = fs.readFileSync(f, "utf-8").substring(0, 2000);
+                const titleMatch = content.match(/<title>(.+?)<\/title>/i);
+                if (titleMatch && titleMatch[1].length > 2) return titleMatch[1];
+            } catch { /* ignore */ }
+        }
+    }
+
+    return "";
+}
+
+/** Analyze a file's content and extract structured technical details. */
+function analyzeFileContent(filePath: string, content: string): { summary: string; tags: string[] } {
+    const ext = filePath.split(".").pop()?.toLowerCase() || "";
+    const fileName = filePath.split("/").pop() || filePath;
+
+    if (ext === "html") return analyzeHTML(fileName, content);
+    if (ext === "css") return analyzeCSS(fileName, content);
+    if (ext === "js" || ext === "ts") return analyzeJS(fileName, content);
+    if (ext === "json") return analyzeJSON(fileName, content);
+    if (ext === "md") return analyzeMD(fileName, content);
+
+    return { summary: `File: ${fileName} (${content.length} bytes)`, tags: [] };
+}
+
+function analyzeHTML(fileName: string, content: string): { summary: string; tags: string[] } {
+    const lines: string[] = [];
+    const tags: string[] = ["html"];
+
+    // Title
+    const title = content.match(/<title>(.+?)<\/title>/i);
+    if (title) lines.push(`Title: "${title[1]}"`);
+
+    // Architecture: single-file or multi-file
+    const hasInlineCSS = /<style[\s>]/i.test(content);
+    const hasInlineJS = /<script[\s>]/i.test(content);
+    const externalCSS = content.match(/href="([^"]+\.css)"/gi) || [];
+    const externalJS = content.match(/src="([^"]+\.js)"/gi) || [];
+    const arch: string[] = [];
+    if (hasInlineCSS && hasInlineJS && externalCSS.length === 0 && externalJS.length === 0) {
+        arch.push("Single-file (embedded CSS + JS)");
+    } else {
+        if (hasInlineCSS) arch.push("inline CSS");
+        if (hasInlineJS) arch.push("inline JS");
+        if (externalCSS.length > 0) arch.push(`external CSS: ${externalCSS.join(", ")}`);
+        if (externalJS.length > 0) arch.push(`external JS: ${externalJS.join(", ")}`);
+    }
+    if (arch.length > 0) lines.push(`Architecture: ${arch.join(", ")}`);
+
+    // Canvas
+    const canvas = content.match(/<canvas[^>]*(?:width="(\d+)")[^>]*(?:height="(\d+)")?/i)
+        || content.match(/<canvas[^>]*>/i);
+    if (canvas) {
+        tags.push("html-canvas");
+        const w = canvas[1], h = canvas[2];
+        lines.push(`Canvas: ${w && h ? `${w}x${h}` : "dynamic size"}`);
+    }
+
+    // Fonts
+    const fonts = content.match(/family=([^"&]+)/g);
+    if (fonts) {
+        const fontNames = [...new Set(fonts.map((f) => decodeURIComponent(f.replace("family=", "")).replace(/\+/g, " ")))];
+        lines.push(`Fonts: ${fontNames.join(", ")}`);
+    }
+
+    // Colors / theme
+    const bgColors = content.match(/background(?:-color)?:\s*(#[0-9a-f]{3,8}|rgb[^;)]+)/gi) || [];
+    const textColors = content.match(/(?:^|[\s;])color:\s*(#[0-9a-f]{3,8}|rgb[^;)]+)/gi) || [];
+    const allColors = [...new Set([...bgColors, ...textColors].map((c) => {
+        const m = c.match(/(#[0-9a-f]{3,8}|rgb[^;)]+\))/i);
+        return m ? m[1] : "";
+    }).filter(Boolean))];
+    if (allColors.length > 0) lines.push(`Colors: ${allColors.slice(0, 6).join(", ")}`);
+
+    // JS functions (key game/app logic)
+    const funcs = content.match(/function\s+(\w+)/g) || [];
+    const arrowFuncs = content.match(/(?:const|let)\s+(\w+)\s*=\s*(?:\([^)]*\)|[\w]+)\s*=>/g) || [];
+    const allFuncs = [
+        ...funcs.map((f) => f.replace("function ", "")),
+        ...arrowFuncs.map((f) => f.match(/(?:const|let)\s+(\w+)/)?.[1] || ""),
+    ].filter(Boolean);
+    if (allFuncs.length > 0) {
+        lines.push(`Key functions: ${allFuncs.slice(0, 12).join(", ")}`);
+        tags.push("vanilla-js");
+    }
+
+    // Event listeners (controls)
+    const events = content.match(/addEventListener\s*\(\s*['"](\w+)['"]/g) || [];
+    const eventTypes = [...new Set(events.map((e) => e.match(/['"](\w+)['"]/)?.[1] || ""))].filter(Boolean);
+    if (eventTypes.length > 0) lines.push(`Controls: ${eventTypes.join(", ")} events`);
+
+    // requestAnimationFrame (game loop)
+    if (/requestAnimationFrame/i.test(content)) {
+        lines.push("Game loop: requestAnimationFrame");
+        tags.push("game-loop");
+    }
+
+    // setInterval (alternative game loop)
+    const intervals = content.match(/setInterval\s*\([^,]+,\s*(\d+)\)/g);
+    if (intervals) lines.push(`Timer: setInterval (${intervals.length} timer(s))`);
+
+    // Key game patterns
+    if (/collision|collide|intersect|hitTest/i.test(content)) {
+        lines.push("Collision detection: yes");
+        tags.push("collision-detection");
+    }
+    if (/score/i.test(content)) tags.push("scoring");
+    if (/gameOver|game.over|game_over/i.test(content)) tags.push("game-state");
+    if (/localStorage/i.test(content)) tags.push("local-storage");
+
+    // File size
+    lines.push(`Total size: ${content.length} bytes, ~${content.split("\n").length} lines`);
+
+    return {
+        summary: `### ${fileName}\n${lines.join("\n")}`,
+        tags: tags.slice(0, 5),
+    };
+}
+
+function analyzeCSS(fileName: string, content: string): { summary: string; tags: string[] } {
+    const lines: string[] = [];
+    const tags: string[] = ["css"];
+
+    const selectors = content.match(/[.#][\w-]+/g) || [];
+    const uniqueSelectors = [...new Set(selectors)];
+    if (uniqueSelectors.length > 0) lines.push(`Key selectors: ${uniqueSelectors.slice(0, 10).join(", ")}`);
+
+    if (/display:\s*grid/i.test(content)) { lines.push("Layout: CSS Grid"); tags.push("css-grid"); }
+    if (/display:\s*flex/i.test(content)) { lines.push("Layout: Flexbox"); tags.push("flexbox"); }
+    if (/@keyframes/i.test(content)) { lines.push("Animations: CSS keyframes"); tags.push("css-animations"); }
+    if (/@media/i.test(content)) lines.push("Responsive: media queries");
+    if (/--[\w-]+:/i.test(content)) lines.push("CSS variables: yes");
+
+    return { summary: `### ${fileName}\n${lines.join("\n")}`, tags };
+}
+
+function analyzeJS(fileName: string, content: string): { summary: string; tags: string[] } {
+    const lines: string[] = [];
+    const tags: string[] = ["javascript"];
+
+    const funcs = content.match(/(?:function\s+(\w+)|(?:const|let)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[\w]+)\s*=>)/g) || [];
+    if (funcs.length > 0) lines.push(`Functions: ${funcs.slice(0, 10).map((f) => f.match(/(\w+)/)?.[1]).filter(Boolean).join(", ")}`);
+
+    const classes = content.match(/class\s+(\w+)/g) || [];
+    if (classes.length > 0) {
+        lines.push(`Classes: ${classes.map((c) => c.replace("class ", "")).join(", ")}`);
+        tags.push("oop");
+    }
+
+    const imports = content.match(/import\s+.+from\s+['"]([^'"]+)['"]/g) || [];
+    if (imports.length > 0) lines.push(`Imports: ${imports.slice(0, 5).join(", ")}`);
+
+    return { summary: `### ${fileName}\n${lines.join("\n")}`, tags };
+}
+
+function analyzeJSON(fileName: string, content: string): { summary: string; tags: string[] } {
+    try {
+        const obj = JSON.parse(content);
+        const keys = Object.keys(obj).slice(0, 8);
+        const lines = [`Top-level keys: ${keys.join(", ")}`];
+        if (obj.name) lines.push(`Name: ${obj.name}`);
+        if (obj.dependencies) lines.push(`Dependencies: ${Object.keys(obj.dependencies).join(", ")}`);
+        return { summary: `### ${fileName}\n${lines.join("\n")}`, tags: ["config"] };
+    } catch {
+        return { summary: `### ${fileName}\nJSON config file`, tags: ["config"] };
+    }
+}
+
+function analyzeMD(fileName: string, content: string): { summary: string; tags: string[] } {
+    const headings = content.match(/^#+\s+.+$/gm) || [];
+    const lines = headings.length > 0
+        ? [`Sections: ${headings.slice(0, 6).map((h) => h.replace(/^#+\s+/, "")).join(", ")}`]
+        : [`Markdown doc (${content.split("\n").length} lines)`];
+    return { summary: `### ${fileName}\n${lines.join("\n")}`, tags: ["docs"] };
 }
