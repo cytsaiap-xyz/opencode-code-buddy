@@ -25,7 +25,7 @@ export interface MemoryEntry {
     title: string;
     content: string;
     tags: string[];
-    timestamp: number;
+    timestamp: string;
 }
 
 // ---- Knowledge Graph ----
@@ -38,7 +38,7 @@ export interface Entity {
     type: EntityType;
     observations: string[];
     tags: string[];
-    createdAt: number;
+    createdAt: string;
 }
 
 export interface Relation {
@@ -47,7 +47,7 @@ export interface Relation {
     to: string;
     type: string;
     description?: string;
-    createdAt: number;
+    createdAt: string;
 }
 
 // ---- Error Learning ----
@@ -59,7 +59,7 @@ export type ErrorType =
 
 export interface MistakeRecord {
     id: string;
-    timestamp: number;
+    timestamp: string;
     action: string;
     errorType: ErrorType;
     userCorrection: string;
@@ -84,7 +84,7 @@ export interface SessionState {
 // ---- Observer ----
 
 export interface Observation {
-    timestamp: number;
+    timestamp: string;
     tool: string;
     args: Record<string, unknown>;
     result?: string;
@@ -100,7 +100,7 @@ export interface PendingDeletion {
     ids: string[];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     items: any[];
-    timestamp: number;
+    timestamp: string;
     confirmCode: string;
 }
 

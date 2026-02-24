@@ -8,7 +8,7 @@
 
 import type { MemoryType, ErrorType, Observation } from "./types";
 import { MEMORY_TYPE_CATEGORY, VALID_MEMORY_TYPES } from "./types";
-import { generateId, formatTime } from "./helpers";
+import { generateId, formatTime, nowTimestamp } from "./helpers";
 import { askAI, addMemoryWithDedup, extractJSON, extractJSONArray } from "./llm";
 import type { PluginState } from "./state";
 
@@ -78,7 +78,7 @@ export function createHooks(s: PluginState) {
             const isWriteAction = isWriteTool(input.tool) || !!fileEdited;
 
             s.pushObservation({
-                timestamp: Date.now(),
+                timestamp: nowTimestamp(),
                 tool: input.tool,
                 args: meta,
                 result: outputStr.substring(0, 200),
@@ -92,8 +92,8 @@ export function createHooks(s: PluginState) {
         "experimental.session.compacting": async (_input: unknown, output: { context: string[] }) => {
             if (!s.config.hooks.compactionContext) return;
 
-            const recentMemories = [...s.memories].sort((a, b) => b.timestamp - a.timestamp).slice(0, 5);
-            const recentMistakes = [...s.mistakes].sort((a, b) => b.timestamp - a.timestamp).slice(0, 3);
+            const recentMemories = [...s.memories].sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, 5);
+            const recentMistakes = [...s.mistakes].sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, 3);
             const topEntities = s.entities.slice(0, 5);
 
             let block = "## Code Buddy Context (Auto-Injected)\n\n";
@@ -505,7 +505,7 @@ Respond ONLY with valid JSON:
                 correctMethod: entry.errorInfo.solution || "",
                 impact: entry.errorInfo.pattern || "",
                 preventionMethod: entry.errorInfo.prevention || "",
-                timestamp: Date.now(),
+                timestamp: nowTimestamp(),
                 relatedRule: "auto-detected",
             });
             s.saveMistakes();

@@ -10,7 +10,7 @@ import type {
     SessionState, Observation, PendingDeletion, ProviderInfo, PluginConfig,
 } from "./types";
 import { LocalStorage } from "./storage";
-import { getMemoryCategory } from "./helpers";
+import { getMemoryCategory, nowTimestamp } from "./helpers";
 
 export class PluginState {
     // Persisted data
