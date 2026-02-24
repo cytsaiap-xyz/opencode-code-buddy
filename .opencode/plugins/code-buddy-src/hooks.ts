@@ -35,12 +35,8 @@ function isWriteTool(toolName: string): boolean {
 
 export function createHooks(s: PluginState) {
     return {
-        // ---- event: file.edited + session.idle ----
+        // ---- event: session.idle ----
         event: async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
-            if (event.type === "file.edited") {
-                handleFileEdited(s, event.properties);
-                return;
-            }
             if (event.type === "session.idle") {
                 await handleSessionIdle(s);
             }
@@ -77,11 +73,14 @@ export function createHooks(s: PluginState) {
             const fileEdited = (meta.filePath || meta.path || meta.file) as string | undefined;
             const isWriteAction = isWriteTool(input.tool) || !!fileEdited;
 
+            // Capture more context for write/edit operations (code content is the valuable part)
+            const resultLimit = isWriteAction ? 800 : 300;
+
             s.pushObservation({
                 timestamp: nowTimestamp(),
                 tool: input.tool,
                 args: meta,
-                result: outputStr.substring(0, 200),
+                result: outputStr.substring(0, resultLimit),
                 hasError,
                 fileEdited,
                 isWriteAction,
@@ -126,22 +125,6 @@ export function createHooks(s: PluginState) {
 // ============================================
 // Internal handlers
 // ============================================
-
-function handleFileEdited(s: PluginState, properties?: Record<string, unknown>): void {
-    const filePath = (properties?.file as string) || "";
-    if (!s.config.hooks.trackFiles || !filePath) return;
-
-    const ignored = ["node_modules", ".git", "dist", "build", ".next", "package-lock"];
-    if (ignored.some((p) => filePath.includes(p))) return;
-
-    addMemoryWithDedup(s, {
-        type: "feature",
-        title: `File edited: ${filePath.split("/").pop()}`,
-        content: `Edited file: ${filePath}`,
-        tags: ["auto-tracked", "file-edit"],
-    }, false);
-    s.log(`[code-buddy] 📝 Tracked file edit: ${filePath}`);
-}
 
 async function handleSessionIdle(s: PluginState): Promise<void> {
     s.session.lastActivity = Date.now();
@@ -416,39 +399,35 @@ async function processFullAutoObserver(s: PluginState): Promise<void> {
     const observationSummary = buf.map((o) => {
         const time = formatTime(o.timestamp);
         const argsStr = o.args
-            ? ` (${Object.entries(o.args).map(([k, v]) => `${k}: ${typeof v === "string" ? v.substring(0, 80) : JSON.stringify(v).substring(0, 80)}`).join(", ")})`
+            ? ` (${Object.entries(o.args).map(([k, v]) => `${k}: ${typeof v === "string" ? v.substring(0, 200) : JSON.stringify(v).substring(0, 200)}`).join(", ")})`
             : "";
         return `[${time}] ${o.tool}${argsStr}${o.result ? `\n  → ${o.result}` : ""}${o.hasError ? " ❌ ERROR" : ""}`;
     }).join("\n");
 
-    const prompt = `You are a development observer AI analyzing a coding session.
-
-First, classify the session intent, then produce memory entries that match that intent.
+    const prompt = `You are a knowledge extraction AI. Your job is to capture **reusable project knowledge** from a coding session — the kind of information that helps rebuild or extend this project in the future.
 
 Observations:
 ${observationSummary}
 ${hasErrors ? "\n⚠️ Some observations contain errors." : ""}
 ${editedFiles.length > 0 ? `\n📝 Files edited: ${editedFiles.join(", ")}` : ""}
 
-Step 1 — Classify the session intent (pick one):
-- "task-execution": focused work building or changing something → prefer type "feature" or "bugfix"
-- "debugging": errors encountered, repeated attempts, same files revisited → prefer type "bugfix" or "lesson"
-- "refactoring": similar changes applied across multiple files → prefer type "pattern" or "decision"
-- "exploration": mostly reading/searching, minimal edits → prefer type "note" or "lesson"
+DO NOT record what tools were used or what files were edited. Instead, extract the **knowledge behind the work**:
 
-Step 2 — Produce memory entries guided by the intent:
-1. **MERGE related actions into a single entry.** Multiple edits to the same component, file area, or logical concern MUST become one entry, not three. Group by intent, not by individual tool call.
-2. Each entry must have a "category" field: "task", "decision", "error", or "pattern"
-3. For "task": what was being worked on (type: "feature", "bugfix", or "note")
-4. For "decision": any architectural or technical choice made (type: "decision")
-5. For "error": any failed command or error encountered (type: "bugfix" or "lesson")
-6. For "pattern": any reusable coding pattern observed (type: "pattern")
-7. Each entry needs: category, title (max 60 chars), summary (1-2 sentences), type, tags (3-5 lowercase hyphenated)
-8. For "error" entries, add "errorInfo": {"pattern": "...", "solution": "...", "prevention": "..."}
-9. Output 1-3 entries. Fewer is better. Don't create entries for trivial observations.
-10. **Tags must be specific and descriptive.** Use the actual domain concepts from the code, NOT generic labels.
-    - BAD tags: "code-change", "file-edit", "update", "enhancement", "modification"
-    - GOOD tags: "ui-layout", "auth-flow", "api-validation", "css-flexbox", "react-hooks", "db-migration"
+1. **What is being built?** (e.g. "2048 web game", "REST API for user auth")
+2. **Architecture & structure** (e.g. "Single HTML file with embedded CSS/JS", "React components with Context for state")
+3. **Tech stack & libraries** (e.g. "vanilla JS + CSS grid", "Next.js + Tailwind + Prisma")
+4. **Styling approach** (e.g. "CSS grid for board layout, CSS variables for theming, slide animations via CSS transitions")
+5. **Key implementation patterns** (e.g. "Game state as 4x4 matrix, merge logic scans each row left-to-right")
+6. **Design decisions & why** (e.g. "Chose CSS grid over flexbox because tiles need precise 2D positioning")
+
+Rules:
+- Output 1-3 entries. Fewer is better. SKIP if the session is trivial (just reading files, no real work).
+- Each entry must have: category, title (max 60 chars), summary (2-4 sentences of actual knowledge), type, tags
+- "category": "task" (what was built), "decision" (architecture/tech choice), "error" (bug + fix), or "pattern" (reusable approach)
+- "type": "feature", "decision", "pattern", "bugfix", "lesson", or "note"
+- "summary" MUST contain concrete, specific details — file names, CSS properties, function names, library APIs. NOT vague descriptions like "updated the code" or "made changes to files."
+- Tags must be domain-specific: "css-grid", "game-state-matrix", "react-context", "slide-animation", NOT generic like "code-change" or "file-edit"
+- For "error" entries, add "errorInfo": {"pattern": "...", "solution": "...", "prevention": "..."}
 
 Respond ONLY with valid JSON:
 {"intent": "task-execution", "entries": [{"category": "task", "title": "...", "summary": "...", "type": "feature", "tags": ["..."]}]}`;
@@ -525,31 +504,29 @@ async function processSingleSummaryObserver(s: PluginState): Promise<void> {
     const observationSummary = buf.map((o) => {
         const time = formatTime(o.timestamp);
         const argsStr = o.args
-            ? ` (${Object.entries(o.args).map(([k, v]) => `${k}: ${typeof v === "string" ? v.substring(0, 80) : JSON.stringify(v).substring(0, 80)}`).join(", ")})`
+            ? ` (${Object.entries(o.args).map(([k, v]) => `${k}: ${typeof v === "string" ? v.substring(0, 200) : JSON.stringify(v).substring(0, 200)}`).join(", ")})`
             : "";
         return `[${time}] ${o.tool}${argsStr}${o.result ? `\n  → ${o.result}` : ""}${o.hasError ? " ❌ ERROR" : ""}`;
     }).join("\n");
 
-    const prompt = `You are a development observer AI. Analyze the following tool usage observations.
-
-First, classify the session intent, then produce a single cohesive memory entry.
+    const prompt = `You are a knowledge extraction AI. Analyze the following coding session and extract **reusable project knowledge** — the kind of information that helps rebuild or extend this project in the future.
 
 Observations:
 ${observationSummary}
 
-Step 1 — Classify the session intent (pick one):
-- "task-execution": focused work building or changing something → prefer type "feature" or "bugfix"
-- "debugging": errors encountered, repeated attempts, same files revisited → prefer type "bugfix" or "lesson"
-- "refactoring": similar changes applied across multiple files → prefer type "pattern" or "decision"
-- "exploration": mostly reading/searching, minimal edits → prefer type "note" or "lesson"
+DO NOT describe what tools were used. Extract the knowledge behind the work:
+- What is being built? (project type and purpose)
+- Architecture & file structure choices
+- Tech stack, libraries, and frameworks
+- Styling/UI approach (CSS strategy, layout method, animations)
+- Key implementation patterns (data structures, algorithms, state management)
+- Design decisions and their reasoning
 
-Step 2 — Produce a single memory entry guided by the intent:
-1. Summarize the overall session in 1-2 sentences. Merge related actions (e.g. multiple edits to the same area) into one description.
-2. Choose the best memory type based on your classified intent: "decision", "pattern", "bugfix", "lesson", "feature", or "note"
-3. Create a concise title (max 60 chars) that captures the high-level goal, not individual steps.
-4. Generate 3-5 specific, descriptive tags using actual domain concepts from the code.
-   - BAD tags: "code-change", "file-edit", "update", "enhancement"
-   - GOOD tags: "ui-layout", "auth-flow", "api-validation", "css-flexbox", "react-hooks"
+Produce a single memory entry:
+1. Summary must be 2-4 sentences of **concrete, specific knowledge** — mention file names, CSS properties, function names, library APIs, data structures. NOT "updated files" or "made changes."
+2. Type: "feature" (what was built), "decision" (architecture/tech choice), "pattern" (reusable approach), "bugfix", "lesson", or "note"
+3. Title (max 60 chars): the high-level project knowledge, e.g. "2048 game: CSS grid board with slide animations"
+4. Tags: 3-5 domain-specific tags like "css-grid", "game-state-matrix", "react-context". NOT generic like "code-change" or "file-edit".
 
 Respond ONLY with valid JSON:
 {"intent": "task-execution", "title": "...", "summary": "...", "type": "...", "tags": ["..."]}`;
