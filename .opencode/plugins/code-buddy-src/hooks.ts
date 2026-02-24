@@ -642,33 +642,68 @@ function flushObservationsSync(s: PluginState): void {
     const editedFiles = [...new Set(buf.filter((o) => o.fileEdited).map((o) => o.fileEdited as string))];
     if (editedFiles.length === 0) return;
 
-    // Detect session type: debug/fix vs build/create
+    // Detect session type: debug/fix vs enhance vs build/create
     const sessionType = detectSessionType(buf);
 
     if (sessionType === "debug") {
         flushDebugSession(s, buf, editedFiles);
+    } else if (sessionType === "enhance") {
+        flushEnhanceSession(s, buf, editedFiles);
     } else {
         flushBuildSession(s, buf, editedFiles);
     }
 }
 
-/** Detect whether this is a debug/fix session or a build/create session. */
-function detectSessionType(buf: Observation[]): "debug" | "build" {
+/** Detect whether this is a debug/fix, enhance, or build/create session. */
+function detectSessionType(buf: Observation[]): "debug" | "enhance" | "build" {
     const hasNewFiles = buf.some((o) => o.tool.toLowerCase().includes("write") || o.tool === "write");
     const hasEdits = buf.some((o) => o.tool.toLowerCase().includes("edit") || o.tool === "edit");
     const hasReads = buf.some((o) => o.tool.toLowerCase().includes("read") || o.tool === "read");
 
-    // Debug pattern: reads + edits but no new file creation,
-    // OR edits to existing files (edit tool, not write tool)
-    if (hasEdits && hasReads && !hasNewFiles) return "debug";
+    // If new files are written, it's a build
+    if (hasNewFiles) return "build";
 
-    // Also check: if only edits (no writes), it's a debug session
-    if (hasEdits && !hasNewFiles) return "debug";
-
-    // Check observation results for error/fix/bug keywords
-    const debugKeywords = /\b(bug|fix|debug|error|issue|broken|wrong|incorrect|missing|patch)\b/i;
+    // No new files — it's either debug or enhance.
+    // Check for explicit debug/fix keywords first.
+    const debugKeywords = /\b(bug|fix|debug|error|issue|broken|wrong|incorrect|missing|patch|crash|typo|regression)\b/i;
     const hasDebugContext = buf.some((o) => o.result && debugKeywords.test(o.result));
     if (hasDebugContext && hasEdits) return "debug";
+
+    // Enhancement signals: substantial new code added via edits
+    if (hasEdits) {
+        let totalAdded = 0;
+        let totalRemoved = 0;
+        let newFunctions = 0;
+        let newElements = 0;
+
+        for (const o of buf) {
+            if (!(o.tool === "edit" || o.tool.toLowerCase().includes("edit"))) continue;
+            const newStr = (o.args?.new_string || o.args?.newString || o.args?.new || "") as string;
+            const oldStr = (o.args?.old_string || o.args?.oldString || o.args?.old || "") as string;
+
+            totalAdded += newStr.split("\n").length;
+            totalRemoved += oldStr.split("\n").length;
+
+            // Count new functions/methods added
+            const newFuncMatches = newStr.match(/function\s+\w+/g) || [];
+            const oldFuncMatches = oldStr.match(/function\s+\w+/g) || [];
+            newFunctions += Math.max(0, newFuncMatches.length - oldFuncMatches.length);
+
+            // Count new HTML elements added
+            const newElemMatches = newStr.match(/<\w+[\s>]/g) || [];
+            const oldElemMatches = oldStr.match(/<\w+[\s>]/g) || [];
+            newElements += Math.max(0, newElemMatches.length - oldElemMatches.length);
+        }
+
+        // Enhancement: significantly more lines added than removed, or new functions/elements
+        const netAdded = totalAdded - totalRemoved;
+        if (netAdded > 10 || newFunctions >= 1 || newElements >= 2) {
+            return "enhance";
+        }
+    }
+
+    // Small targeted edits without debug keywords — still classify as debug (small fix)
+    if (hasEdits) return "debug";
 
     return "build";
 }
@@ -777,6 +812,131 @@ function flushDebugSession(s: PluginState, buf: Observation[], editedFiles: stri
     s.saveMemories();
     s.clearObservations();
     s.log(`[code-buddy] 📤 Sync flush: saved bugfix guide "${title}"`);
+}
+
+/** Flush an enhancement session — extract new features added to existing project. */
+function flushEnhanceSession(s: PluginState, buf: Observation[], editedFiles: string[]): void {
+    const fileNames = editedFiles.map((f) => f.split("/").pop() || f);
+    const projectName = extractProjectName(buf, editedFiles);
+
+    // Extract diffs from edit observations — focus on what was ADDED
+    const features: string[] = [];
+    const diffs: string[] = [];
+    const newFunctionNames: string[] = [];
+    const newCSSProps: string[] = [];
+    const newHTMLElements: string[] = [];
+
+    for (const o of buf) {
+        if (!(o.tool === "edit" || o.tool.toLowerCase().includes("edit"))) continue;
+
+        const fileName = o.fileEdited ? (o.fileEdited.split("/").pop() || "") : "";
+        const oldStr = (o.args?.old_string || o.args?.oldString || o.args?.old || "") as string;
+        const newStr = (o.args?.new_string || o.args?.newString || o.args?.new || "") as string;
+
+        if (!newStr) continue;
+
+        // Record the diff
+        const diffEntry: string[] = [];
+        if (fileName) diffEntry.push(`File: ${fileName}`);
+        if (oldStr) diffEntry.push(`Before: ${oldStr.substring(0, 150).trim()}`);
+        diffEntry.push(`After: ${newStr.substring(0, 200).trim()}`);
+        diffs.push(diffEntry.join("\n"));
+
+        // Detect new functions added
+        const newFuncs = newStr.match(/function\s+(\w+)/g) || [];
+        const oldFuncs = new Set((oldStr.match(/function\s+(\w+)/g) || []).map((f) => f.replace("function ", "")));
+        for (const f of newFuncs) {
+            const name = f.replace("function ", "");
+            if (!oldFuncs.has(name)) newFunctionNames.push(name);
+        }
+
+        // Detect new arrow functions
+        const newArrows = newStr.match(/(?:const|let)\s+(\w+)\s*=\s*(?:\([^)]*\)|[\w]+)\s*=>/g) || [];
+        const oldArrows = new Set((oldStr.match(/(?:const|let)\s+(\w+)\s*=\s*(?:\([^)]*\)|[\w]+)\s*=>/g) || [])
+            .map((f) => f.match(/(?:const|let)\s+(\w+)/)?.[1] || ""));
+        for (const f of newArrows) {
+            const name = f.match(/(?:const|let)\s+(\w+)/)?.[1] || "";
+            if (name && !oldArrows.has(name)) newFunctionNames.push(name);
+        }
+
+        // Detect new HTML elements
+        const newElems = newStr.match(/<(\w+)[\s>]/g) || [];
+        const oldElems = new Set((oldStr.match(/<(\w+)[\s>]/g) || []).map((e) => e));
+        for (const e of newElems) {
+            if (!oldElems.has(e)) newHTMLElements.push(e.replace(/<|[\s>]/g, ""));
+        }
+
+        // Detect new CSS properties/features
+        if (/text-shadow|box-shadow|animation|transition|transform/i.test(newStr) &&
+            !/text-shadow|box-shadow|animation|transition|transform/i.test(oldStr)) {
+            newCSSProps.push("visual effects");
+        }
+        if (/localStorage/i.test(newStr) && !/localStorage/i.test(oldStr)) {
+            features.push("localStorage persistence");
+        }
+        if (/addEventListener/i.test(newStr) && !/addEventListener/i.test(oldStr)) {
+            const eventMatch = newStr.match(/addEventListener\s*\(\s*['"](\w+)['"]/);
+            if (eventMatch) features.push(`${eventMatch[1]} event handler`);
+        }
+    }
+
+    // Build the enhancement guide
+    const title = projectName
+        ? `Enhancement: ${projectName} (${fileNames.join(", ")})`.substring(0, 60)
+        : `Enhancement: ${fileNames.join(", ")}`.substring(0, 60);
+
+    const sections: string[] = [
+        `## Enhancement: ${projectName || fileNames.join(", ")}`,
+        `Files modified: ${editedFiles.join(", ")}`,
+    ];
+
+    if (newFunctionNames.length > 0) {
+        sections.push(`New functions: ${[...new Set(newFunctionNames)].join(", ")}`);
+    }
+    if (newHTMLElements.length > 0) {
+        const unique = [...new Set(newHTMLElements)];
+        sections.push(`New HTML elements: ${unique.join(", ")}`);
+    }
+    if (features.length > 0) {
+        sections.push(`Features added: ${[...new Set(features)].join(", ")}`);
+    }
+    if (newCSSProps.length > 0) {
+        sections.push(`CSS additions: ${[...new Set(newCSSProps)].join(", ")}`);
+    }
+
+    if (diffs.length > 0) {
+        sections.push("", "### Changes");
+        for (const diff of diffs.slice(0, 8)) {
+            sections.push(diff);
+            sections.push("");
+        }
+    }
+
+    // Include current file analysis for full context
+    for (const filePath of editedFiles.slice(0, 2)) {
+        try {
+            const content = fs.readFileSync(filePath, "utf-8");
+            const analysis = analyzeFileContent(filePath, content);
+            if (analysis.summary) sections.push(analysis.summary);
+        } catch { /* file may not exist */ }
+    }
+
+    const guide = sections.join("\n").substring(0, 2000);
+    const tags = [...new Set([...inferTags(buf, editedFiles), "enhancement"])].slice(0, 8);
+
+    s.memories.push({
+        id: generateId("mem"),
+        type: "feature" as MemoryType,
+        category: "knowledge",
+        title,
+        content: guide,
+        tags: [...new Set([...tags, "auto-observed", "enhancement-guide"])],
+        timestamp: nowTimestamp(),
+    } as MemoryEntry);
+
+    s.saveMemories();
+    s.clearObservations();
+    s.log(`[code-buddy] 📤 Sync flush: saved enhancement guide "${title}"`);
 }
 
 /** Flush a build/create session — extract project structure and tech details. */
