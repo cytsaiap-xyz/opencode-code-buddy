@@ -62,6 +62,10 @@ function readProviderFromOpenCodeJson(filePath: string, s: PluginState): Provide
 
         const baseURL = String(cfg.options?.baseURL || cfg.options?.baseUrl || cfg.api || "");
         const apiKey = String(cfg.options?.apiKey || "");
+        const headers: Record<string, string> | undefined =
+            cfg.options?.headers && typeof cfg.options.headers === "object"
+                ? cfg.options.headers as Record<string, string>
+                : undefined;
 
         if (!baseURL && !apiKey) return null;
 
@@ -72,6 +76,7 @@ function readProviderFromOpenCodeJson(filePath: string, s: PluginState): Provide
             baseURL,
             apiKey,
             name: cfg.name || targetId,
+            headers,
         };
     } catch (error) {
         s.log(`[code-buddy] Error reading ${filePath}:`, error);
@@ -104,12 +109,14 @@ export async function resolveProvider(s: PluginState): Promise<ProviderInfo | nu
                     }
 
                     if (modelID) {
+                        const hdrs = target.options?.headers;
                         s.resolvedProvider = {
                             providerID: target.id,
                             modelID,
                             baseURL: String(target.options?.baseURL || target.options?.baseUrl || ""),
                             apiKey: String(target.key || target.options?.apiKey || ""),
                             name: target.name || target.id,
+                            headers: hdrs && typeof hdrs === "object" ? hdrs : undefined,
                         };
 
                         s.log(`[code-buddy] Resolved provider: ${s.resolvedProvider.name} (${s.resolvedProvider.modelID})`);
@@ -167,6 +174,7 @@ export async function askAI(s: PluginState, prompt: string): Promise<string> {
                 headers: {
                     "Content-Type": "application/json",
                     Authorization: `Bearer ${provider.apiKey}`,
+                    ...(provider.headers || {}),
                 },
                 body: JSON.stringify({
                     model: provider.modelID,
