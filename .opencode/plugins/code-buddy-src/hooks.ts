@@ -9,7 +9,7 @@
 import * as fs from "node:fs";
 import type { MemoryType, ErrorType, Observation } from "./types";
 import { MEMORY_TYPE_CATEGORY, VALID_MEMORY_TYPES } from "./types";
-import { generateId, formatTime, nowTimestamp } from "./helpers";
+import { generateId, formatTime, nowTimestamp, calculateSimilarity } from "./helpers";
 import { askAI, addMemoryWithDedup, extractJSON, extractJSONArray } from "./llm";
 import type { PluginState } from "./state";
 
@@ -708,6 +708,55 @@ function detectSessionType(buf: Observation[]): "debug" | "enhance" | "build" {
     return "build";
 }
 
+/**
+ * Sync dedup: check Jaccard similarity and merge if a match is found.
+ * Used by sync flush paths (process exit) where async LLM calls aren't possible.
+ * - If a similar memory exists → update it in-place (merge content, union tags, bump timestamp).
+ * - If no match → push a new entry.
+ * Returns the saved/merged entry.
+ */
+const SYNC_JACCARD_THRESHOLD = 0.55; // slightly lower than async (0.65) to catch project rebuilds
+
+function saveMemoryWithSyncDedup(
+    s: PluginState,
+    entry: import("./types").MemoryEntry,
+): import("./types").MemoryEntry {
+    const combined = `${entry.title} ${entry.content}`;
+
+    // Find the best Jaccard match
+    let bestIdx = -1;
+    let bestScore = 0;
+    for (let i = 0; i < s.memories.length; i++) {
+        const m = s.memories[i];
+        const score = calculateSimilarity(combined, `${m.title} ${m.content}`);
+        if (score >= SYNC_JACCARD_THRESHOLD && score > bestScore) {
+            bestScore = score;
+            bestIdx = i;
+        }
+    }
+
+    if (bestIdx >= 0) {
+        const existing = s.memories[bestIdx];
+        s.log(`[code-buddy] 🔄 Sync dedup: merging with "${existing.title}" (Jaccard: ${bestScore.toFixed(2)})`);
+
+        // Merge: new content replaces old (it's more up-to-date), union tags
+        existing.title = entry.title;
+        existing.content = entry.content;
+        existing.timestamp = entry.timestamp;
+        existing.tags = [...new Set([...existing.tags, ...entry.tags])].slice(0, 10);
+
+        s.saveMemories();
+        s.clearObservations();
+        return existing;
+    }
+
+    // No match — save as new
+    s.memories.push(entry);
+    s.saveMemories();
+    s.clearObservations();
+    return entry;
+}
+
 /** Flush a debug/fix session — extract diffs, symptoms, and fixes. */
 function flushDebugSession(s: PluginState, buf: Observation[], editedFiles: string[]): void {
     const fileNames = editedFiles.map((f) => f.split("/").pop() || f);
@@ -799,7 +848,7 @@ function flushDebugSession(s: PluginState, buf: Observation[], editedFiles: stri
     const guide = sections.join("\n").substring(0, 2000);
     const tags = [...new Set([...inferTags(buf, editedFiles), "bugfix", "debugging"])].slice(0, 8);
 
-    s.memories.push({
+    const saved = saveMemoryWithSyncDedup(s, {
         id: generateId("mem"),
         type: "bugfix" as MemoryType,
         category: "solution",
@@ -809,9 +858,7 @@ function flushDebugSession(s: PluginState, buf: Observation[], editedFiles: stri
         timestamp: nowTimestamp(),
     } as MemoryEntry);
 
-    s.saveMemories();
-    s.clearObservations();
-    s.log(`[code-buddy] 📤 Sync flush: saved bugfix guide "${title}"`);
+    s.log(`[code-buddy] 📤 Sync flush: saved bugfix guide "${saved.title}"`);
 }
 
 /** Flush an enhancement session — extract new features added to existing project. */
@@ -924,7 +971,7 @@ function flushEnhanceSession(s: PluginState, buf: Observation[], editedFiles: st
     const guide = sections.join("\n").substring(0, 2000);
     const tags = [...new Set([...inferTags(buf, editedFiles), "enhancement"])].slice(0, 8);
 
-    s.memories.push({
+    const saved = saveMemoryWithSyncDedup(s, {
         id: generateId("mem"),
         type: "feature" as MemoryType,
         category: "knowledge",
@@ -934,9 +981,7 @@ function flushEnhanceSession(s: PluginState, buf: Observation[], editedFiles: st
         timestamp: nowTimestamp(),
     } as MemoryEntry);
 
-    s.saveMemories();
-    s.clearObservations();
-    s.log(`[code-buddy] 📤 Sync flush: saved enhancement guide "${title}"`);
+    s.log(`[code-buddy] 📤 Sync flush: saved enhancement guide "${saved.title}"`);
 }
 
 /** Flush a build/create session — extract project structure and tech details. */
@@ -975,7 +1020,7 @@ function flushBuildSession(s: PluginState, buf: Observation[], editedFiles: stri
 
     const tags = [...new Set([...inferTags(buf, editedFiles), ...allTags])].slice(0, 8);
 
-    s.memories.push({
+    const saved = saveMemoryWithSyncDedup(s, {
         id: generateId("mem"),
         type: "feature" as MemoryType,
         category: "knowledge",
@@ -985,9 +1030,7 @@ function flushBuildSession(s: PluginState, buf: Observation[], editedFiles: stri
         timestamp: nowTimestamp(),
     } as MemoryEntry);
 
-    s.saveMemories();
-    s.clearObservations();
-    s.log(`[code-buddy] 📤 Sync flush: saved project guide "${title}"`);
+    s.log(`[code-buddy] 📤 Sync flush: saved project guide "${saved.title}"`);
 }
 
 // ---- File analysis helpers for sync flush ----
