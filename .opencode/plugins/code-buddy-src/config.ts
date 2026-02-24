@@ -84,6 +84,3 @@ export function loadConfig(configPath: string, log: LogFn = console.log): Plugin
     return { ...defaultConfig };
 }
 
-export function saveConfig(configPath: string, config: PluginConfig): void {
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 4), "utf-8");
-}
