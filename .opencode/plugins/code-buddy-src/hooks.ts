@@ -642,6 +642,145 @@ function flushObservationsSync(s: PluginState): void {
     const editedFiles = [...new Set(buf.filter((o) => o.fileEdited).map((o) => o.fileEdited as string))];
     if (editedFiles.length === 0) return;
 
+    // Detect session type: debug/fix vs build/create
+    const sessionType = detectSessionType(buf);
+
+    if (sessionType === "debug") {
+        flushDebugSession(s, buf, editedFiles);
+    } else {
+        flushBuildSession(s, buf, editedFiles);
+    }
+}
+
+/** Detect whether this is a debug/fix session or a build/create session. */
+function detectSessionType(buf: Observation[]): "debug" | "build" {
+    const hasNewFiles = buf.some((o) => o.tool.toLowerCase().includes("write") || o.tool === "write");
+    const hasEdits = buf.some((o) => o.tool.toLowerCase().includes("edit") || o.tool === "edit");
+    const hasReads = buf.some((o) => o.tool.toLowerCase().includes("read") || o.tool === "read");
+
+    // Debug pattern: reads + edits but no new file creation,
+    // OR edits to existing files (edit tool, not write tool)
+    if (hasEdits && hasReads && !hasNewFiles) return "debug";
+
+    // Also check: if only edits (no writes), it's a debug session
+    if (hasEdits && !hasNewFiles) return "debug";
+
+    // Check observation results for error/fix/bug keywords
+    const debugKeywords = /\b(bug|fix|debug|error|issue|broken|wrong|incorrect|missing|patch)\b/i;
+    const hasDebugContext = buf.some((o) => o.result && debugKeywords.test(o.result));
+    if (hasDebugContext && hasEdits) return "debug";
+
+    return "build";
+}
+
+/** Flush a debug/fix session — extract diffs, symptoms, and fixes. */
+function flushDebugSession(s: PluginState, buf: Observation[], editedFiles: string[]): void {
+    const fileNames = editedFiles.map((f) => f.split("/").pop() || f);
+    const projectName = extractProjectName(buf, editedFiles);
+
+    // Extract diffs from edit observations
+    const diffs: string[] = [];
+    for (const o of buf) {
+        if (!(o.tool === "edit" || o.tool.toLowerCase().includes("edit"))) continue;
+
+        const fileName = o.fileEdited ? (o.fileEdited.split("/").pop() || "") : "";
+        let oldStr = "";
+        let newStr = "";
+
+        // Primary: extract from input args (old_string / new_string)
+        if (o.args) {
+            oldStr = (o.args.old_string || o.args.oldString || o.args.old || "") as string;
+            newStr = (o.args.new_string || o.args.newString || o.args.new || "") as string;
+        }
+
+        // Fallback: parse unified diff from result
+        if (!oldStr && !newStr && o.result) {
+            const diffLines = o.result.split("\n");
+            const removals: string[] = [];
+            const additions: string[] = [];
+            for (const line of diffLines) {
+                if (line.startsWith("-") && !line.startsWith("---")) {
+                    const cleaned = line.substring(1).trim();
+                    if (cleaned && !cleaned.startsWith("@@")) removals.push(cleaned);
+                }
+                if (line.startsWith("+") && !line.startsWith("+++")) {
+                    const cleaned = line.substring(1).trim();
+                    if (cleaned && !cleaned.startsWith("@@")) additions.push(cleaned);
+                }
+            }
+            oldStr = removals.join("\n");
+            newStr = additions.join("\n");
+        }
+
+        if (oldStr || newStr) {
+            const diffEntry: string[] = [];
+            if (fileName) diffEntry.push(`File: ${fileName}`);
+            if (oldStr) diffEntry.push(`Before: ${oldStr.substring(0, 200).trim()}`);
+            if (newStr) diffEntry.push(`After: ${newStr.substring(0, 200).trim()}`);
+            diffs.push(diffEntry.join("\n"));
+        }
+    }
+
+    // Extract context from read observations (what was investigated)
+    const investigated: string[] = [];
+    for (const o of buf) {
+        if (o.tool === "read" || o.tool.toLowerCase().includes("read")) {
+            const file = o.fileEdited ? (o.fileEdited.split("/").pop() || "") : "";
+            if (file) investigated.push(file);
+        }
+    }
+
+    // Build the bugfix guide
+    const title = projectName
+        ? `Bugfix: ${projectName} (${fileNames.join(", ")})`.substring(0, 60)
+        : `Bugfix: ${fileNames.join(", ")}`.substring(0, 60);
+
+    const sections: string[] = [
+        `## Bugfix: ${projectName || fileNames.join(", ")}`,
+        `Files changed: ${editedFiles.join(", ")}`,
+    ];
+
+    if (investigated.length > 0) {
+        sections.push(`Files investigated: ${[...new Set(investigated)].join(", ")}`);
+    }
+
+    if (diffs.length > 0) {
+        sections.push("", "### Changes");
+        for (const diff of diffs.slice(0, 5)) {
+            sections.push(diff);
+            sections.push("");
+        }
+    }
+
+    // Also include current file analysis for context
+    for (const filePath of editedFiles.slice(0, 2)) {
+        try {
+            const content = fs.readFileSync(filePath, "utf-8");
+            const analysis = analyzeFileContent(filePath, content);
+            if (analysis.summary) sections.push(analysis.summary);
+        } catch { /* file may not exist */ }
+    }
+
+    const guide = sections.join("\n").substring(0, 2000);
+    const tags = [...new Set([...inferTags(buf, editedFiles), "bugfix", "debugging"])].slice(0, 8);
+
+    s.memories.push({
+        id: generateId("mem"),
+        type: "bugfix" as MemoryType,
+        category: "solution",
+        title,
+        content: guide,
+        tags: [...new Set([...tags, "auto-observed", "bugfix-guide"])],
+        timestamp: nowTimestamp(),
+    } as MemoryEntry);
+
+    s.saveMemories();
+    s.clearObservations();
+    s.log(`[code-buddy] 📤 Sync flush: saved bugfix guide "${title}"`);
+}
+
+/** Flush a build/create session — extract project structure and tech details. */
+function flushBuildSession(s: PluginState, buf: Observation[], editedFiles: string[]): void {
     // Read actual file contents from disk to extract knowledge
     const fileAnalyses: string[] = [];
     const allTags: string[] = [];

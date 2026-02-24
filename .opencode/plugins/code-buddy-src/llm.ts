@@ -270,8 +270,8 @@ Respond in JSON only:
 // Deduplication & Merge
 // ============================================
 
-const JACCARD_THRESHOLD = 0.55;
-const LLM_SIMILARITY_THRESHOLD = 0.7;
+const JACCARD_THRESHOLD = 0.65;
+const LLM_SIMILARITY_THRESHOLD = 0.75;
 
 export async function findSimilarMemories(
     s: PluginState,
