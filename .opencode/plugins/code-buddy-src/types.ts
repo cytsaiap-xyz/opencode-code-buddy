@@ -117,6 +117,7 @@ export interface ProviderInfo {
 // ---- Config ----
 
 export interface PluginConfig {
+    enabled: boolean;
     llm: {
         preferredProvider: string;
         preferredModel: string;
