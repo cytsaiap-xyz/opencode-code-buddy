@@ -7,6 +7,7 @@ import * as path from "node:path";
 import type { PluginConfig } from "./types";
 
 export const defaultConfig: PluginConfig = {
+    enabled: true,
     llm: {
         preferredProvider: "",
         preferredModel: "",

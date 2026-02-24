@@ -26,6 +26,13 @@ export const CodeBuddyPlugin: Plugin = async (ctx) => {
     const storage = new LocalStorage(path.join(globalBase, "data"), log);
     const state = new PluginState(storage, config, configPath, client);
 
+    // When disabled, only expose buddy_config so the user can re-enable
+    if (config.enabled === false) {
+        log("[code-buddy] Plugin disabled. Use buddy_config(\"set_enabled\", \"true\") to re-enable.");
+        const allTools = createTools(state);
+        return { tool: { buddy_config: allTools.buddy_config } };
+    }
+
     // Log initial status (non-blocking, respects verbose)
     getLLMStatus(state).then((status) =>
         state.log(`[code-buddy] Plugin initialized - LLM: ${status}`),

@@ -34,7 +34,7 @@ export function createTools(s: PluginState) {
         buddy_config: tool({
             description: "View or update plugin configuration (LLM, verbose, etc.)",
             args: {
-                action: tool.schema.string().optional().describe("Action: view, set_provider, set_model, set_verbose"),
+                action: tool.schema.string().optional().describe("Action: view, set_enabled, set_provider, set_model, set_verbose"),
                 value: tool.schema.string().optional().describe("Value for the setting (for set_verbose: true/false)"),
             },
             async execute(args: any) {
@@ -55,8 +55,9 @@ export function createTools(s: PluginState) {
                     }
 
                     return [
-                        `## ⚙️ LLM Configuration\n`,
-                        `**Status**: ${status}\n`,
+                        `## ⚙️ Plugin Configuration\n`,
+                        `**Plugin**: ${s.config.enabled !== false ? "✅ enabled" : "❌ disabled"}`,
+                        `**LLM Status**: ${status}\n`,
                         `### Resolved Provider`,
                         `| Setting | Value |\n|---------|-------|`,
                         providerInfo,
@@ -68,15 +69,24 @@ export function createTools(s: PluginState) {
                         `| Temperature | ${s.config.llm.temperature} |`,
                         `\n### Features`,
                         `| Feature | Value |\n|---------|-------|`,
+                        `| Enabled | ${s.config.enabled !== false ? "✅ on" : "❌ off"} |`,
                         `| Verbose | ${s.config.features.verbose !== false ? "✅ on" : "❌ off"} |`,
                         `\n### Config File`,
                         `\`${s.configPath}\``,
                         `\n### How to Configure`,
-                        `1. Set provider in \`opencode.json\` → auto-detected`,
-                        `2. Or use: \`buddy_config("set_provider", "nvidia")\``,
-                        `3. Or use: \`buddy_config("set_model", "moonshotai/kimi-k2.5")\``,
-                        `4. Or use: \`buddy_config("set_verbose", "false")\` to silence status logs`,
+                        `1. \`buddy_config("set_enabled", "false")\` to disable the plugin`,
+                        `2. Set provider in \`opencode.json\` → auto-detected`,
+                        `3. Or use: \`buddy_config("set_provider", "nvidia")\``,
+                        `4. Or use: \`buddy_config("set_model", "moonshotai/kimi-k2.5")\``,
+                        `5. Or use: \`buddy_config("set_verbose", "false")\` to silence status logs`,
                     ].join("\n");
+                }
+
+                if (action === "set_enabled") {
+                    const enabled = args.value !== "false" && args.value !== "off" && args.value !== "0";
+                    s.config.enabled = enabled;
+                    saveConfig(s.configPath, s.config);
+                    return `✅ Plugin ${enabled ? "enabled" : "disabled"}.\n\n${enabled ? "All tools and hooks are active." : "All tools and hooks are off. Only buddy_config remains available.\n\n⚠️ Restart the session for this to take full effect."}`;
                 }
 
                 if (action === "set_provider" && args.value) {
@@ -101,7 +111,7 @@ export function createTools(s: PluginState) {
                     return `✅ Verbose ${enabled ? "enabled" : "disabled"}\n\nPlugin status logs are now ${enabled ? "on" : "off"}.`;
                 }
 
-                return `❌ Unknown action: ${action}\n\nAvailable actions: view, set_provider, set_model, set_verbose`;
+                return `❌ Unknown action: ${action}\n\nAvailable actions: view, set_enabled, set_provider, set_model, set_verbose`;
             },
         }),
 
