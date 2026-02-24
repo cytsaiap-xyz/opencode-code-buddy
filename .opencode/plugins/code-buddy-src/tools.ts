@@ -8,7 +8,6 @@ import type {
     EntityType, Entity, Relation, ErrorType, MistakeRecord,
 } from "./types";
 import { MEMORY_TYPE_CATEGORY, VALID_MEMORY_TYPES } from "./types";
-import { saveConfig } from "./config";
 import {
     generateId, generateConfirmCode, searchText,
     getMemoryCategory, detectTaskType, estimateComplexity,
@@ -32,86 +31,62 @@ export function createTools(s: PluginState) {
         // ========================================
 
         buddy_config: tool({
-            description: "View or update plugin configuration (LLM, verbose, etc.)",
-            args: {
-                action: tool.schema.string().optional().describe("Action: view, set_enabled, set_provider, set_model, set_verbose"),
-                value: tool.schema.string().optional().describe("Value for the setting (for set_verbose: true/false)"),
-            },
-            async execute(args: any) {
-                const action = args.action || "view";
+            description: "View current plugin configuration. Edit the config file directly to change settings.",
+            args: {},
+            async execute() {
+                const provider = await resolveProvider(s);
+                const status = await getLLMStatus(s);
 
-                if (action === "view") {
-                    const provider = await resolveProvider(s);
-                    const status = await getLLMStatus(s);
-
-                    let providerInfo = "No provider resolved";
-                    if (provider) {
-                        providerInfo = [
-                            `| Provider | ${provider.name} (${provider.providerID}) |`,
-                            `| Model | ${provider.modelID} |`,
-                            `| Base URL | ${provider.baseURL} |`,
-                            `| API Key | ***configured*** |`,
-                        ].join("\n");
-                    }
-
-                    return [
-                        `## ⚙️ Plugin Configuration\n`,
-                        `**Plugin**: ${s.config.enabled !== false ? "✅ enabled" : "❌ disabled"}`,
-                        `**LLM Status**: ${status}\n`,
-                        `### Resolved Provider`,
-                        `| Setting | Value |\n|---------|-------|`,
-                        providerInfo,
-                        `\n### Config`,
-                        `| Setting | Value |\n|---------|-------|`,
-                        `| Preferred Provider | ${s.config.llm.preferredProvider || "(auto)"} |`,
-                        `| Preferred Model | ${s.config.llm.preferredModel || "(auto)"} |`,
-                        `| Max Tokens | ${s.config.llm.maxTokens} |`,
-                        `| Temperature | ${s.config.llm.temperature} |`,
-                        `\n### Features`,
-                        `| Feature | Value |\n|---------|-------|`,
-                        `| Enabled | ${s.config.enabled !== false ? "✅ on" : "❌ off"} |`,
-                        `| Verbose | ${s.config.features.verbose !== false ? "✅ on" : "❌ off"} |`,
-                        `\n### Config File`,
-                        `\`${s.configPath}\``,
-                        `\n### How to Configure`,
-                        `1. \`buddy_config("set_enabled", "false")\` to disable the plugin`,
-                        `2. Set provider in \`opencode.json\` → auto-detected`,
-                        `3. Or use: \`buddy_config("set_provider", "nvidia")\``,
-                        `4. Or use: \`buddy_config("set_model", "moonshotai/kimi-k2.5")\``,
-                        `5. Or use: \`buddy_config("set_verbose", "false")\` to silence status logs`,
+                let providerInfo = "No provider resolved";
+                if (provider) {
+                    providerInfo = [
+                        `| Provider | ${provider.name} (${provider.providerID}) |`,
+                        `| Model | ${provider.modelID} |`,
+                        `| Base URL | ${provider.baseURL} |`,
+                        `| API Key | ***configured*** |`,
                     ].join("\n");
                 }
 
-                if (action === "set_enabled") {
-                    const enabled = args.value !== "false" && args.value !== "off" && args.value !== "0";
-                    s.config.enabled = enabled;
-                    saveConfig(s.configPath, s.config);
-                    return `✅ Plugin ${enabled ? "enabled" : "disabled"}.\n\n${enabled ? "All tools and hooks are active." : "All tools and hooks are off. Only buddy_config remains available.\n\n⚠️ Restart the session for this to take full effect."}`;
-                }
+                const b = (v: boolean) => v !== false ? "✅ on" : "❌ off";
+                const { features: f, hooks: h } = s.config;
 
-                if (action === "set_provider" && args.value) {
-                    s.config.llm.preferredProvider = args.value;
-                    s.resolvedProvider = null;
-                    saveConfig(s.configPath, s.config);
-                    const status = await getLLMStatus(s);
-                    return `✅ Preferred provider set to: ${args.value}\n\nLLM Status: ${status}`;
-                }
-
-                if (action === "set_model" && args.value) {
-                    s.config.llm.preferredModel = args.value;
-                    s.resolvedProvider = null;
-                    saveConfig(s.configPath, s.config);
-                    return `✅ Preferred model set to: ${args.value}`;
-                }
-
-                if (action === "set_verbose") {
-                    const enabled = args.value !== "false" && args.value !== "off" && args.value !== "0";
-                    s.config.features.verbose = enabled;
-                    saveConfig(s.configPath, s.config);
-                    return `✅ Verbose ${enabled ? "enabled" : "disabled"}\n\nPlugin status logs are now ${enabled ? "on" : "off"}.`;
-                }
-
-                return `❌ Unknown action: ${action}\n\nAvailable actions: view, set_enabled, set_provider, set_model, set_verbose`;
+                return [
+                    `## ⚙️ Plugin Configuration\n`,
+                    `**Plugin**: ${b(s.config.enabled)}`,
+                    `**LLM Status**: ${status}\n`,
+                    `### Resolved Provider`,
+                    `| Setting | Value |\n|---------|-------|`,
+                    providerInfo,
+                    `\n### LLM`,
+                    `| Setting | Value |\n|---------|-------|`,
+                    `| preferredProvider | ${s.config.llm.preferredProvider || "(auto)"} |`,
+                    `| preferredModel | ${s.config.llm.preferredModel || "(auto)"} |`,
+                    `| maxTokens | ${s.config.llm.maxTokens} |`,
+                    `| temperature | ${s.config.llm.temperature} |`,
+                    `\n### Features`,
+                    `| Setting | Value |\n|---------|-------|`,
+                    `| memory | ${b(f.memory)} |`,
+                    `| knowledgeGraph | ${b(f.knowledgeGraph)} |`,
+                    `| errorLearning | ${b(f.errorLearning)} |`,
+                    `| workflow | ${b(f.workflow)} |`,
+                    `| ai | ${b(f.ai)} |`,
+                    `| verbose | ${b(f.verbose)} |`,
+                    `\n### Hooks`,
+                    `| Setting | Value |\n|---------|-------|`,
+                    `| autoRemind | ${b(h.autoRemind)} |`,
+                    `| protectEnv | ${b(h.protectEnv)} |`,
+                    `| trackFiles | ${b(h.trackFiles)} |`,
+                    `| compactionContext | ${b(h.compactionContext)} |`,
+                    `| autoObserve | ${b(h.autoObserve)} |`,
+                    `| observeMinActions | ${h.observeMinActions} |`,
+                    `| observeIgnoreTools | ${h.observeIgnoreTools.join(", ")} |`,
+                    `| fullAuto | ${b(h.fullAuto)} |`,
+                    `| autoErrorDetect | ${b(h.autoErrorDetect)} |`,
+                    `| requireEditForRecord | ${b(h.requireEditForRecord)} |`,
+                    `\n### Config File`,
+                    `To change settings, edit: \`${s.configPath}\``,
+                    `Changes take effect on next session restart.`,
+                ].join("\n");
             },
         }),
 

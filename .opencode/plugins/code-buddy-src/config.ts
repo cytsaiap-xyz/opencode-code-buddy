@@ -66,6 +66,8 @@ export function loadConfig(configPath: string, log: LogFn = console.log): Plugin
         if (fs.existsSync(configPath)) {
             const loaded = JSON.parse(fs.readFileSync(configPath, "utf-8"));
             const merged = deepMerge(defaultConfig as unknown as Record<string, unknown>, loaded) as unknown as PluginConfig;
+            // Persist merged config so newly added defaults appear in the file
+            fs.writeFileSync(configPath, JSON.stringify(merged, null, 4), "utf-8");
             log("[code-buddy] Config loaded from", configPath);
             return merged;
         }
@@ -82,6 +84,3 @@ export function loadConfig(configPath: string, log: LogFn = console.log): Plugin
     return { ...defaultConfig };
 }
 
-export function saveConfig(configPath: string, config: PluginConfig): void {
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 4), "utf-8");
-}
