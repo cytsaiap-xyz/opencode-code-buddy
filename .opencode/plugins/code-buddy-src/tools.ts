@@ -11,6 +11,7 @@ import { MEMORY_TYPE_CATEGORY, VALID_MEMORY_TYPES } from "./types";
 import {
     generateId, generateConfirmCode, searchText,
     getMemoryCategory, detectTaskType, estimateComplexity,
+    formatDate, formatDateTime,
     TASK_STEPS, WORKFLOW_STEPS, WORKFLOW_PROGRESS,
 } from "./helpers";
 import {
@@ -350,7 +351,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
 
                 let msg = `## 🔍 Search Results for "${args.query}" (${results.length})\n\n`;
                 for (const m of results) {
-                    msg += `### ${m.title}\n- **Type**: ${m.type}\n- **Date**: ${new Date(m.timestamp).toLocaleDateString()}\n- **Tags**: ${m.tags.join(", ")}\n\n${m.content.substring(0, 150)}...\n\n---\n\n`;
+                    msg += `### ${m.title}\n- **Type**: ${m.type}\n- **Date**: ${formatDate(m.timestamp)}\n- **Tags**: ${m.tags.join(", ")}\n\n${m.content.substring(0, 150)}...\n\n---\n\n`;
                 }
                 return msg;
             },
@@ -367,7 +368,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
 
                 let msg = `## 📜 Recent Memories (${recent.length})\n\n`;
                 for (const m of recent) {
-                    msg += `- **${m.title}** (${m.type}/${getMemoryCategory(m)}) - ${new Date(m.timestamp).toLocaleDateString()}\n`;
+                    msg += `- **${m.title}** (${m.type}/${getMemoryCategory(m)}) - ${formatDate(m.timestamp)}\n`;
                 }
                 return msg;
             },
@@ -397,7 +398,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                 const typeLabels = cat === "solution" ? "(decision, bugfix, lesson)" : "(pattern, feature, note)";
                 let output = `## 📂 ${cat.charAt(0).toUpperCase() + cat.slice(1)} Memories ${typeLabels}\n\n**Found**: ${filtered.length} item(s)\n\n`;
                 for (const m of filtered) {
-                    output += `### ${m.title}\n- **Type**: ${m.type} | **ID**: \`${m.id}\`\n- **Date**: ${new Date(m.timestamp).toLocaleString()}\n- **Content**: ${m.content.substring(0, 150)}${m.content.length > 150 ? "..." : ""}\n\n`;
+                    output += `### ${m.title}\n- **Type**: ${m.type} | **ID**: \`${m.id}\`\n- **Date**: ${formatDateTime(m.timestamp)}\n- **Content**: ${m.content.substring(0, 150)}${m.content.length > 150 ? "..." : ""}\n\n`;
                 }
                 return output;
             },
@@ -537,7 +538,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
 
                 let summary = `## ⚠️ Deletion Confirmation Required\n\n> **WARNING**: This action cannot be undone!\n\n### Items to be Deleted (${itemsToDelete.length})\n\n| ID | Type | Title | Date |\n|----|------|-------|------|\n`;
                 for (const item of itemsToDelete.slice(0, 10)) {
-                    const date = new Date(item.timestamp).toLocaleDateString();
+                    const date = formatDate(item.timestamp);
                     summary += `| \`${item.id.substring(0, 15)}...\` | ${item.type} | ${item.title.substring(0, 30)} | ${date} |\n`;
                 }
                 if (itemsToDelete.length > 10) summary += `\n... and ${itemsToDelete.length - 10} more items\n`;

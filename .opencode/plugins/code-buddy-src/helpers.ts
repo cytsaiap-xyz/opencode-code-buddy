@@ -66,6 +66,36 @@ export function calculateSimilarity(text1: string, text2: string): number {
     return union > 0 ? intersection / union : 0;
 }
 
+// ---- Date formatting ----
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** Format timestamp as human-readable date, e.g. "Feb 24, 2026" */
+export function formatDate(ts: number): string {
+    const d = new Date(ts);
+    return `${MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+}
+
+/** Format timestamp as human-readable date+time, e.g. "Feb 24, 2026 3:45 PM" */
+export function formatDateTime(ts: number): string {
+    const d = new Date(ts);
+    const h = d.getHours();
+    const m = d.getMinutes().toString().padStart(2, "0");
+    const ampm = h >= 12 ? "PM" : "AM";
+    const h12 = h % 12 || 12;
+    return `${MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()} ${h12}:${m} ${ampm}`;
+}
+
+/** Format timestamp as human-readable time, e.g. "3:45 PM" */
+export function formatTime(ts: number): string {
+    const d = new Date(ts);
+    const h = d.getHours();
+    const m = d.getMinutes().toString().padStart(2, "0");
+    const ampm = h >= 12 ? "PM" : "AM";
+    const h12 = h % 12 || 12;
+    return `${h12}:${m} ${ampm}`;
+}
+
 // ---- Task classification ----
 
 export function detectTaskType(task: string): string {

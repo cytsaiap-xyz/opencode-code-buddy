@@ -8,7 +8,7 @@
 
 import type { MemoryType, ErrorType } from "./types";
 import { MEMORY_TYPE_CATEGORY, VALID_MEMORY_TYPES } from "./types";
-import { generateId } from "./helpers";
+import { generateId, formatTime } from "./helpers";
 import { askAI, addMemoryWithDedup, extractJSON, extractJSONArray } from "./llm";
 import type { PluginState } from "./state";
 
@@ -201,7 +201,7 @@ async function processFullAutoObserver(s: PluginState): Promise<void> {
     const editedFiles = [...new Set(buf.filter((o) => o.fileEdited).map((o) => o.fileEdited))];
 
     const observationSummary = buf.map((o) => {
-        const time = new Date(o.timestamp).toLocaleTimeString();
+        const time = formatTime(o.timestamp);
         const argsStr = o.args
             ? ` (${Object.entries(o.args).map(([k, v]) => `${k}: ${typeof v === "string" ? v.substring(0, 80) : JSON.stringify(v).substring(0, 80)}`).join(", ")})`
             : "";
@@ -339,7 +339,7 @@ async function processSingleSummaryObserver(s: PluginState): Promise<void> {
     const buf = s.observationBuffer;
 
     const observationSummary = buf.map((o) => {
-        const time = new Date(o.timestamp).toLocaleTimeString();
+        const time = formatTime(o.timestamp);
         const argsStr = o.args
             ? ` (${Object.entries(o.args).map(([k, v]) => `${k}: ${typeof v === "string" ? v.substring(0, 80) : JSON.stringify(v).substring(0, 80)}`).join(", ")})`
             : "";
