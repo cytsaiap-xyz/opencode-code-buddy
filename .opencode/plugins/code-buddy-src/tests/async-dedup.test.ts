@@ -363,8 +363,8 @@ describe("addMemoryWithDedup", () => {
         });
 
         expect(result.action).toBe("merged");
-        // Fallback content should contain "[Previous]"
-        expect(result.entry!.content).toContain("[Previous]");
+        // Fallback uses the newer content entirely (no "[Previous]" compounding)
+        expect(result.entry!.content).toBe("Updated snake game guide content");
     });
 
     it("returns correct method in result", async () => {

@@ -420,7 +420,10 @@ function classifyIntent(buf: Observation[], editedFiles: string[], hasErrors: bo
 /**
  * Build meaningful fallback entries from raw observation data.
  * Used when AI classification fails or no LLM is available.
- * Focuses on WHAT was accomplished, not tool/file inventory.
+ *
+ * Uses analyzeFileContent to extract structural understanding from
+ * edited files (game loops, state patterns, layout strategy, etc.)
+ * instead of grabbing raw code first-lines.
  */
 function buildFallbackEntries(
     buf: Observation[],
@@ -431,6 +434,8 @@ function buildFallbackEntries(
     const { intent, type } = classifyIntent(buf, editedFiles, hasErrors);
 
     const fileNames = editedFiles.map(shortFileName).filter(Boolean);
+    const projectName = extractProjectName(buf, editedFiles);
+
     let title: string;
     let summary: string;
 
@@ -438,26 +443,38 @@ function buildFallbackEntries(
         const verb = intent === "debugging" ? "Fixed"
             : intent === "refactoring" ? "Refactored"
             : "Built";
-        title = fileNames.length <= 2
-            ? `${verb} ${fileNames.join(", ")}`
-            : `${verb} ${fileNames.slice(0, 2).join(", ")} +${fileNames.length - 2} more`;
 
-        // Try to build a summary from edit diffs — what actually changed
-        const changeSummaries: string[] = [];
-        for (const o of buf) {
-            if (!o.isWriteAction || !o.args) continue;
-            const newStr = (o.args.new_string || o.args.newString || o.args.content || "") as string;
-            if (newStr && newStr.length > 20) {
-                // Extract first meaningful line of the new content
-                const firstLine = newStr.split("\n").find((l) => l.trim().length > 10);
-                if (firstLine) changeSummaries.push(firstLine.trim().substring(0, 80));
-            }
+        // Use project name in title when available (e.g. "Built 2048 game")
+        if (projectName) {
+            title = `${verb} ${projectName}`;
+        } else {
+            title = fileNames.length <= 2
+                ? `${verb} ${fileNames.join(", ")}`
+                : `${verb} ${fileNames.slice(0, 2).join(", ")} +${fileNames.length - 2} more`;
         }
 
-        if (changeSummaries.length > 0) {
-            summary = `Changes: ${changeSummaries.slice(0, 3).join("; ")}`;
+        // Read edited files from disk and extract structural understanding
+        // (same analysis as flushBuildSession — detects game loops, state, layout, etc.)
+        const analyses: string[] = [];
+        const analysisTags: string[] = [];
+        for (const filePath of editedFiles) {
+            try {
+                const content = fs.readFileSync(filePath, "utf-8");
+                const analysis = analyzeFileContent(filePath, content);
+                if (analysis.summary) {
+                    // Strip the "### filename\n" header — we just want the insights
+                    const lines = analysis.summary.split("\n").filter((l) => !l.startsWith("### "));
+                    analyses.push(...lines.filter(Boolean));
+                }
+                analysisTags.push(...analysis.tags);
+            } catch { /* file may not exist */ }
+        }
+
+        if (analyses.length > 0) {
+            // Join the structural insights into a readable summary
+            summary = analyses.slice(0, 6).join(". ").replace(/\.\./g, ".");
         } else {
-            // Fall back to bash command descriptions
+            // No file-level insights — try bash command descriptions
             const cmds = buf
                 .filter((o) => o.args?.command)
                 .map((o) => String(o.args!.command).split("&&")[0].trim().substring(0, 60));
@@ -481,7 +498,7 @@ function buildFallbackEntries(
 
     if (title.length > 60) title = `${title.substring(0, 57)}...`;
 
-    const tags = inferTags(buf, editedFiles);
+    const tags = [...new Set([...inferTags(buf, editedFiles)])].slice(0, 5);
 
     entries.push({
         category: intent === "debugging" ? "error" : "task",

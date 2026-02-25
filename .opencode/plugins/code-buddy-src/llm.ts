@@ -305,10 +305,12 @@ Respond with ONLY a JSON object containing "title" and "content" keys.`;
         s.log("[code-buddy] Merge error:", error);
     }
 
-    // Fallback: prefer the new content's title (more specific/recent)
+    // Fallback: use the newer content entirely (it's more up-to-date).
+    // Do NOT concatenate with "[Previous]" — that compounds garbage when both
+    // entries are low-quality rule-based outputs (e.g. "Changes: <!DOCTYPE html>").
     return {
         title: newContent.title.substring(0, 60),
-        content: `${newContent.content}\n\n[Previous] ${existing.content.substring(0, 200)}`,
+        content: newContent.content,
     };
 }
 
