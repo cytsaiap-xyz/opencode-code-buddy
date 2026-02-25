@@ -7,7 +7,7 @@
  */
 
 import * as fs from "node:fs";
-import type { MemoryType, ErrorType, Observation } from "./types";
+import type { MemoryType, MemoryEntry, ErrorType, Observation } from "./types";
 import { MEMORY_TYPE_CATEGORY, VALID_MEMORY_TYPES } from "./types";
 import { generateId, formatTime, nowTimestamp, searchText, calculateSimilarity, calculateGuideRelevance } from "./helpers";
 import { detectSessionType, saveMemoryWithSyncDedup } from "./dedup";
@@ -407,6 +407,7 @@ function classifyIntent(buf: Observation[], editedFiles: string[], hasErrors: bo
 /**
  * Build meaningful fallback entries from raw observation data.
  * Used when AI classification fails or no LLM is available.
+ * Focuses on WHAT was accomplished, not tool/file inventory.
  */
 function buildFallbackEntries(
     buf: Observation[],
@@ -416,60 +417,58 @@ function buildFallbackEntries(
     const entries: AutoEntry[] = [];
     const { intent, type } = classifyIntent(buf, editedFiles, hasErrors);
 
-    // Collect meaningful action descriptions from observations
-    const actions: string[] = [];
-    for (const o of buf) {
-        const desc = describeObservation(o);
-        if (desc && !actions.includes(desc)) actions.push(desc);
-    }
-
-    // Build title from actual work done
     const fileNames = editedFiles.map(shortFileName).filter(Boolean);
     let title: string;
     let summary: string;
 
     if (fileNames.length > 0) {
-        // Title from edited files with intent context
-        const verb = intent === "debugging" ? "Debug"
-            : intent === "refactoring" ? "Refactor"
-            : fileNames.length >= 3 ? "Update" : "Work on";
+        const verb = intent === "debugging" ? "Fixed"
+            : intent === "refactoring" ? "Refactored"
+            : "Built";
         title = fileNames.length <= 2
             ? `${verb} ${fileNames.join(", ")}`
             : `${verb} ${fileNames.slice(0, 2).join(", ")} +${fileNames.length - 2} more`;
 
-        // Summary from key actions
-        const keyActions = actions.slice(0, 4);
-        summary = keyActions.length > 0
-            ? `${keyActions.join(". ")}. Edited ${editedFiles.length} file(s).`
-            : `Edited ${editedFiles.length} file(s): ${editedFiles.map((f) => f.split("/").pop()).join(", ")}`;
-    } else {
-        // No file edits — describe what happened from actions
-        const keyActions = actions.slice(0, 3);
-        if (keyActions.length > 0) {
-            title = keyActions[0].length <= 60
-                ? keyActions[0]
-                : `${keyActions[0].substring(0, 57)}...`;
-            summary = keyActions.join(". ");
+        // Try to build a summary from edit diffs — what actually changed
+        const changeSummaries: string[] = [];
+        for (const o of buf) {
+            if (!o.isWriteAction || !o.args) continue;
+            const newStr = (o.args.new_string || o.args.newString || o.args.content || "") as string;
+            if (newStr && newStr.length > 20) {
+                // Extract first meaningful line of the new content
+                const firstLine = newStr.split("\n").find((l) => l.trim().length > 10);
+                if (firstLine) changeSummaries.push(firstLine.trim().substring(0, 80));
+            }
+        }
+
+        if (changeSummaries.length > 0) {
+            summary = `Changes: ${changeSummaries.slice(0, 3).join("; ")}`;
         } else {
-            // Absolute last resort — still better than just tool names
-            const uniqueTools = [...new Set(buf.map((o) => o.tool))];
-            title = `Session activity (${uniqueTools.slice(0, 2).join(", ")})`;
-            summary = `Performed ${buf.length} operations using ${uniqueTools.join(", ")}`;
+            // Fall back to bash command descriptions
+            const cmds = buf
+                .filter((o) => o.args?.command)
+                .map((o) => String(o.args!.command).split("&&")[0].trim().substring(0, 60));
+            summary = cmds.length > 0
+                ? `Ran: ${cmds.slice(0, 3).join(", ")}`
+                : `${verb} ${editedFiles.map((f) => f.split("/").pop()).join(", ")}`;
+        }
+    } else {
+        // No file edits — describe from commands
+        const cmds = buf
+            .filter((o) => o.args?.command)
+            .map((o) => String(o.args!.command).split("&&")[0].trim().substring(0, 60));
+        if (cmds.length > 0) {
+            title = cmds[0].length <= 60 ? cmds[0] : `${cmds[0].substring(0, 57)}...`;
+            summary = cmds.slice(0, 3).join("; ");
+        } else {
+            title = "Session activity";
+            summary = `${buf.length} operations performed`;
         }
     }
 
-    // Truncate title to 60 chars
     if (title.length > 60) title = `${title.substring(0, 57)}...`;
 
-    // Generate domain-relevant tags instead of raw tool names
     const tags = inferTags(buf, editedFiles);
-    // Add file name stems as tags if we didn't get enough domain tags
-    if (tags.length < 3 && fileNames.length > 0) {
-        for (const fn of fileNames.slice(0, 3 - tags.length)) {
-            const tag = fn.toLowerCase().replace(/[^a-z0-9-]/g, "-");
-            if (tag && !tags.includes(tag)) tags.push(tag);
-        }
-    }
 
     entries.push({
         category: intent === "debugging" ? "error" : "task",
@@ -479,24 +478,33 @@ function buildFallbackEntries(
         tags,
     });
 
-    // Separate error entry if there were errors alongside other work
+    // Separate error entry — focused on the symptom and what fixed it
     if (hasErrors && intent !== "debugging") {
         const errorObs = buf.filter((o) => o.hasError);
-        const errorDescs = errorObs
-            .map((o) => describeObservation(o) || o.result || "")
-            .filter(Boolean);
+
+        // Extract actual error message, not tool description
+        const errorMessages: string[] = [];
+        for (const o of errorObs) {
+            if (o.result) {
+                const errorLine = o.result.split("\n").find((l) =>
+                    /error|Error|ERROR|failed|TypeError|ReferenceError/i.test(l),
+                );
+                if (errorLine) errorMessages.push(errorLine.trim().substring(0, 120));
+            }
+        }
+
         const errorFile = errorObs[0]?.fileEdited
             ? shortFileName(errorObs[0].fileEdited)
-            : errorObs[0]?.tool || "unknown";
+            : "unknown";
 
         entries.push({
             category: "error",
-            title: `Error in ${errorFile}`.substring(0, 60),
-            summary: errorDescs.length > 0
-                ? errorDescs.join("; ").substring(0, 200)
-                : errorObs.map((o) => o.result || "").join("; ").substring(0, 200),
+            title: `Gotcha in ${errorFile}`.substring(0, 60),
+            summary: errorMessages.length > 0
+                ? `Error: ${errorMessages[0]}`
+                : `Error encountered in ${errorFile} during ${intent}`,
             type: "bugfix",
-            tags: [errorFile.toLowerCase().replace(/[^a-z0-9-]/g, "-")],
+            tags: [...inferTags(errorObs, editedFiles), "gotcha"],
         });
     }
 
@@ -518,29 +526,28 @@ async function processFullAutoObserver(s: PluginState): Promise<void> {
         return `[${time}] ${o.tool}${argsStr}${o.result ? `\n  → ${o.result}` : ""}${o.hasError ? " ❌ ERROR" : ""}`;
     }).join("\n");
 
-    const prompt = `You are a knowledge extraction AI. Your job is to capture **reusable project knowledge** from a coding session — the kind of information that helps rebuild or extend this project in the future.
+    const prompt = `You are a knowledge extraction AI. Your job is to capture the **understanding** someone needs to continue working on this project — not an inventory of files/functions, but the mental model, decisions, gotchas, and conventions.
 
 Observations:
 ${observationSummary}
 ${hasErrors ? "\n⚠️ Some observations contain errors." : ""}
 ${editedFiles.length > 0 ? `\n📝 Files edited: ${editedFiles.join(", ")}` : ""}
 
-DO NOT record what tools were used or what files were edited. Instead, extract the **knowledge behind the work**:
+Extract knowledge that answers these questions for a future developer:
 
-1. **What is being built?** (e.g. "2048 web game", "REST API for user auth")
-2. **Architecture & structure** (e.g. "Single HTML file with embedded CSS/JS", "React components with Context for state")
-3. **Tech stack & libraries** (e.g. "vanilla JS + CSS grid", "Next.js + Tailwind + Prisma")
-4. **Styling approach** (e.g. "CSS grid for board layout, CSS variables for theming, slide animations via CSS transitions")
-5. **Key implementation patterns** (e.g. "Game state as 4x4 matrix, merge logic scans each row left-to-right")
-6. **Design decisions & why** (e.g. "Chose CSS grid over flexbox because tiles need precise 2D positioning")
+1. **Mental model** — How does the system work conceptually? What are the core data structures, how does state flow, what's the main algorithm? (e.g. "Snake is an array of {x,y} coords. Movement = unshift new head, pop tail. Growth = skip the pop.")
+2. **Design decisions & rejected alternatives** — What was chosen and what was NOT chosen, and why? (e.g. "Used CSS grid instead of canvas because we need DOM click events on individual tiles")
+3. **Gotchas & landmines** — What broke or would break if done wrong? (e.g. "Don't use setInterval for game loop — it drifts. Use requestAnimationFrame with delta time")
+4. **Conventions established** — What patterns must future code follow to stay consistent? (e.g. "All coordinates are {col, row} not {x, y}. Colors are CSS variables in :root, never hardcoded.")
+5. **Project status** — What works, what's not done, known bugs? (e.g. "Core gameplay works. NOT done: high score persistence, mobile touch. Known bug: food can spawn on snake body.")
 
 Rules:
 - Output 1-3 entries. Fewer is better. SKIP if the session is trivial (just reading files, no real work).
-- Each entry must have: category, title (max 60 chars), summary (2-4 sentences of actual knowledge), type, tags
+- Each entry must have: category, title (max 60 chars), summary (2-4 sentences of actual understanding), type, tags
 - "category": "task" (what was built), "decision" (architecture/tech choice), "error" (bug + fix), or "pattern" (reusable approach)
 - "type": "feature", "decision", "pattern", "bugfix", "lesson", or "note"
-- "summary" MUST contain concrete, specific details — file names, CSS properties, function names, library APIs. NOT vague descriptions like "updated the code" or "made changes to files."
-- Tags must be domain-specific: "css-grid", "game-state-matrix", "react-context", "slide-animation", NOT generic like "code-change" or "file-edit"
+- "summary" MUST explain HOW things work and WHY they are that way — data structures, algorithms, state shape, control flow. NOT lists of function names, file sizes, CSS colors, or "updated the code."
+- Tags must be domain-specific: "state-as-array", "grid-movement", "collision-detection", "event-driven", NOT generic like "code-change", "html", "javascript"
 - For "error" entries, add "errorInfo": {"pattern": "...", "solution": "...", "prevention": "..."}
 
 Respond ONLY with valid JSON:
@@ -625,24 +632,24 @@ async function processSingleSummaryObserver(s: PluginState): Promise<void> {
         return `[${time}] ${o.tool}${argsStr}${o.result ? `\n  → ${o.result}` : ""}${o.hasError ? " ❌ ERROR" : ""}`;
     }).join("\n");
 
-    const prompt = `You are a knowledge extraction AI. Analyze the following coding session and extract **reusable project knowledge** — the kind of information that helps rebuild or extend this project in the future.
+    const prompt = `You are a knowledge extraction AI. Capture the **understanding** a future developer needs to continue this project — the mental model, not an inventory.
 
 Observations:
 ${observationSummary}
 
-DO NOT describe what tools were used. Extract the knowledge behind the work:
-- What is being built? (project type and purpose)
-- Architecture & file structure choices
-- Tech stack, libraries, and frameworks
-- Styling/UI approach (CSS strategy, layout method, animations)
-- Key implementation patterns (data structures, algorithms, state management)
-- Design decisions and their reasoning
+DO NOT list tools used, files edited, function names, or CSS colors. Instead, extract:
+
+1. **Mental model** — How does the system work? Core data structures, state flow, main algorithm. (e.g. "Board is a 4x4 number matrix. Merging scans each row left-to-right, combining equal adjacent cells. Empty cells collapse by filtering zeros.")
+2. **Design decisions** — What was chosen over alternatives, and why? (e.g. "CSS grid for the board because tiles need precise 2D positioning; canvas would lose DOM event handling on tiles")
+3. **Gotchas** — What broke or would break? (e.g. "Must deep-copy board state before each move attempt, otherwise undo is impossible")
+4. **Conventions** — Patterns future code must follow. (e.g. "Coordinates are always {col, row}. State updates go through dispatch(), never direct mutation.")
+5. **Status** — What works, what's missing, known bugs.
 
 Produce a single memory entry:
-1. Summary must be 2-4 sentences of **concrete, specific knowledge** — mention file names, CSS properties, function names, library APIs, data structures. NOT "updated files" or "made changes."
+1. Summary must be 2-4 sentences explaining HOW things work and WHY — data structures, algorithms, state shape, control flow. NOT lists of function names or "made changes to files."
 2. Type: "feature" (what was built), "decision" (architecture/tech choice), "pattern" (reusable approach), "bugfix", "lesson", or "note"
-3. Title (max 60 chars): the high-level project knowledge, e.g. "2048 game: CSS grid board with slide animations"
-4. Tags: 3-5 domain-specific tags like "css-grid", "game-state-matrix", "react-context". NOT generic like "code-change" or "file-edit".
+3. Title (max 60 chars): the conceptual knowledge, e.g. "Snake: array-based movement with unshift/pop"
+4. Tags: 3-5 domain-specific tags like "state-as-array", "grid-movement", "bounding-box-collision". NOT generic like "html", "javascript", "code-change".
 
 Respond ONLY with valid JSON:
 {"intent": "task-execution", "title": "...", "summary": "...", "type": "...", "tags": ["..."]}`;
@@ -715,13 +722,13 @@ function flushObservationsSync(s: PluginState): void {
     }
 }
 
-/** Flush a debug/fix session — extract diffs, symptoms, and fixes. */
+/** Flush a debug/fix session — extract what broke, why, and how it was fixed. */
 function flushDebugSession(s: PluginState, buf: Observation[], editedFiles: string[]): void {
     const fileNames = editedFiles.map((f) => f.split("/").pop() || f);
     const projectName = extractProjectName(buf, editedFiles);
 
-    // Extract diffs from edit observations
-    const diffs: string[] = [];
+    // Extract diffs — the WHAT of the fix
+    const fixes: string[] = [];
     for (const o of buf) {
         if (!(o.tool === "edit" || o.tool.toLowerCase().includes("edit"))) continue;
 
@@ -729,7 +736,6 @@ function flushDebugSession(s: PluginState, buf: Observation[], editedFiles: stri
         let oldStr = "";
         let newStr = "";
 
-        // Primary: extract from input args (old_string / new_string)
         if (o.args) {
             oldStr = (o.args.old_string || o.args.oldString || o.args.old || "") as string;
             newStr = (o.args.new_string || o.args.newString || o.args.new || "") as string;
@@ -755,56 +761,51 @@ function flushDebugSession(s: PluginState, buf: Observation[], editedFiles: stri
         }
 
         if (oldStr || newStr) {
-            const diffEntry: string[] = [];
-            if (fileName) diffEntry.push(`File: ${fileName}`);
-            if (oldStr) diffEntry.push(`Before: ${oldStr.substring(0, 200).trim()}`);
-            if (newStr) diffEntry.push(`After: ${newStr.substring(0, 200).trim()}`);
-            diffs.push(diffEntry.join("\n"));
+            const fixEntry: string[] = [];
+            if (fileName) fixEntry.push(`In ${fileName}:`);
+            if (oldStr) fixEntry.push(`  Was: ${oldStr.substring(0, 150).trim()}`);
+            if (newStr) fixEntry.push(`  Now: ${newStr.substring(0, 150).trim()}`);
+            fixes.push(fixEntry.join("\n"));
         }
     }
 
-    // Extract context from read observations (what was investigated)
-    const investigated: string[] = [];
+    // Extract error messages — the SYMPTOM
+    const errors: string[] = [];
     for (const o of buf) {
-        if (o.tool === "read" || o.tool.toLowerCase().includes("read")) {
-            const file = o.fileEdited ? (o.fileEdited.split("/").pop() || "") : "";
-            if (file) investigated.push(file);
+        if (o.hasError && o.result) {
+            const errorLine = o.result.split("\n").find((l) =>
+                /error|Error|ERROR|failed|FAILED|TypeError|ReferenceError|SyntaxError/i.test(l),
+            );
+            if (errorLine) errors.push(errorLine.trim().substring(0, 150));
         }
     }
 
-    // Build the bugfix guide
+    // Build the bugfix guide — focused on the gotcha/landmine
     const title = projectName
-        ? `Bugfix: ${projectName} (${fileNames.join(", ")})`.substring(0, 60)
-        : `Bugfix: ${fileNames.join(", ")}`.substring(0, 60);
+        ? `Gotcha: ${projectName} (${fileNames.join(", ")})`.substring(0, 60)
+        : `Gotcha: ${fileNames.join(", ")}`.substring(0, 60);
 
     const sections: string[] = [
         `## Bugfix: ${projectName || fileNames.join(", ")}`,
-        `Files changed: ${editedFiles.join(", ")}`,
     ];
 
-    if (investigated.length > 0) {
-        sections.push(`Files investigated: ${[...new Set(investigated)].join(", ")}`);
+    if (errors.length > 0) {
+        sections.push("", "### Symptom");
+        sections.push(...errors.slice(0, 3));
     }
 
-    if (diffs.length > 0) {
-        sections.push("", "### Changes");
-        for (const diff of diffs.slice(0, 5)) {
-            sections.push(diff);
-            sections.push("");
+    if (fixes.length > 0) {
+        sections.push("", "### Fix");
+        for (const fix of fixes.slice(0, 5)) {
+            sections.push(fix);
         }
     }
 
-    // Also include current file analysis for context
-    for (const filePath of editedFiles.slice(0, 2)) {
-        try {
-            const content = fs.readFileSync(filePath, "utf-8");
-            const analysis = analyzeFileContent(filePath, content);
-            if (analysis.summary) sections.push(analysis.summary);
-        } catch { /* file may not exist */ }
-    }
+    sections.push("", "### Prevention");
+    sections.push("Watch for this pattern in future sessions.");
 
     const guide = sections.join("\n").substring(0, 2000);
-    const tags = [...new Set([...inferTags(buf, editedFiles), "bugfix", "debugging"])].slice(0, 8);
+    const tags = [...new Set([...inferTags(buf, editedFiles), "gotcha", "debugging"])].slice(0, 8);
 
     const saved = saveMemoryWithSyncDedup(s, {
         id: generateId("mem"),
@@ -819,17 +820,14 @@ function flushDebugSession(s: PluginState, buf: Observation[], editedFiles: stri
     s.log(`[code-buddy] 📤 Sync flush: saved bugfix guide "${saved.title}"`);
 }
 
-/** Flush an enhancement session — extract new features added to existing project. */
+/** Flush an enhancement session — capture what capability was added and how it integrates. */
 function flushEnhanceSession(s: PluginState, buf: Observation[], editedFiles: string[]): void {
     const fileNames = editedFiles.map((f) => f.split("/").pop() || f);
     const projectName = extractProjectName(buf, editedFiles);
 
-    // Extract diffs from edit observations — focus on what was ADDED
-    const features: string[] = [];
-    const diffs: string[] = [];
-    const newFunctionNames: string[] = [];
-    const newCSSProps: string[] = [];
-    const newHTMLElements: string[] = [];
+    // Extract diffs — focus on understanding WHAT capability was added
+    const changes: string[] = [];
+    const capabilities: string[] = [];
 
     for (const o of buf) {
         if (!(o.tool === "edit" || o.tool.toLowerCase().includes("edit"))) continue;
@@ -840,89 +838,55 @@ function flushEnhanceSession(s: PluginState, buf: Observation[], editedFiles: st
 
         if (!newStr) continue;
 
-        // Record the diff
-        const diffEntry: string[] = [];
-        if (fileName) diffEntry.push(`File: ${fileName}`);
-        if (oldStr) diffEntry.push(`Before: ${oldStr.substring(0, 150).trim()}`);
-        diffEntry.push(`After: ${newStr.substring(0, 200).trim()}`);
-        diffs.push(diffEntry.join("\n"));
+        // Record the change with context
+        const changeEntry: string[] = [];
+        if (fileName) changeEntry.push(`In ${fileName}:`);
+        if (oldStr) changeEntry.push(`  Was: ${oldStr.substring(0, 120).trim()}`);
+        changeEntry.push(`  Now: ${newStr.substring(0, 150).trim()}`);
+        changes.push(changeEntry.join("\n"));
 
-        // Detect new functions added
-        const newFuncs = newStr.match(/function\s+(\w+)/g) || [];
-        const oldFuncs = new Set((oldStr.match(/function\s+(\w+)/g) || []).map((f) => f.replace("function ", "")));
-        for (const f of newFuncs) {
-            const name = f.replace("function ", "");
-            if (!oldFuncs.has(name)) newFunctionNames.push(name);
-        }
-
-        // Detect new arrow functions
-        const newArrows = newStr.match(/(?:const|let)\s+(\w+)\s*=\s*(?:\([^)]*\)|[\w]+)\s*=>/g) || [];
-        const oldArrows = new Set((oldStr.match(/(?:const|let)\s+(\w+)\s*=\s*(?:\([^)]*\)|[\w]+)\s*=>/g) || [])
-            .map((f) => f.match(/(?:const|let)\s+(\w+)/)?.[1] || ""));
-        for (const f of newArrows) {
-            const name = f.match(/(?:const|let)\s+(\w+)/)?.[1] || "";
-            if (name && !oldArrows.has(name)) newFunctionNames.push(name);
-        }
-
-        // Detect new HTML elements
-        const newElems = newStr.match(/<(\w+)[\s>]/g) || [];
-        const oldElems = new Set((oldStr.match(/<(\w+)[\s>]/g) || []).map((e) => e));
-        for (const e of newElems) {
-            if (!oldElems.has(e)) newHTMLElements.push(e.replace(/<|[\s>]/g, ""));
-        }
-
-        // Detect new CSS properties/features
-        if (/text-shadow|box-shadow|animation|transition|transform/i.test(newStr) &&
-            !/text-shadow|box-shadow|animation|transition|transform/i.test(oldStr)) {
-            newCSSProps.push("visual effects");
-        }
+        // Detect what KIND of capability was added (not just names)
         if (/localStorage/i.test(newStr) && !/localStorage/i.test(oldStr)) {
-            features.push("localStorage persistence");
+            capabilities.push("data persistence via localStorage");
         }
         if (/addEventListener/i.test(newStr) && !/addEventListener/i.test(oldStr)) {
             const eventMatch = newStr.match(/addEventListener\s*\(\s*['"](\w+)['"]/);
-            if (eventMatch) features.push(`${eventMatch[1]} event handler`);
+            if (eventMatch) capabilities.push(`${eventMatch[1]} input handling`);
+        }
+        if (/animation|transition|@keyframes/i.test(newStr) && !/animation|transition|@keyframes/i.test(oldStr)) {
+            capabilities.push("visual animations");
+        }
+        if (/fetch\s*\(|axios|XMLHttpRequest/i.test(newStr) && !/fetch\s*\(|axios|XMLHttpRequest/i.test(oldStr)) {
+            capabilities.push("external API integration");
         }
     }
 
-    // Build the enhancement guide
     const title = projectName
-        ? `Enhancement: ${projectName} (${fileNames.join(", ")})`.substring(0, 60)
+        ? `Enhancement: ${projectName}`.substring(0, 60)
         : `Enhancement: ${fileNames.join(", ")}`.substring(0, 60);
 
     const sections: string[] = [
         `## Enhancement: ${projectName || fileNames.join(", ")}`,
-        `Files modified: ${editedFiles.join(", ")}`,
     ];
 
-    if (newFunctionNames.length > 0) {
-        sections.push(`New functions: ${[...new Set(newFunctionNames)].join(", ")}`);
-    }
-    if (newHTMLElements.length > 0) {
-        const unique = [...new Set(newHTMLElements)];
-        sections.push(`New HTML elements: ${unique.join(", ")}`);
-    }
-    if (features.length > 0) {
-        sections.push(`Features added: ${[...new Set(features)].join(", ")}`);
-    }
-    if (newCSSProps.length > 0) {
-        sections.push(`CSS additions: ${[...new Set(newCSSProps)].join(", ")}`);
+    if (capabilities.length > 0) {
+        sections.push("", "### What was added");
+        sections.push([...new Set(capabilities)].map((c) => `- ${c}`).join("\n"));
     }
 
-    if (diffs.length > 0) {
-        sections.push("", "### Changes");
-        for (const diff of diffs.slice(0, 8)) {
-            sections.push(diff);
-            sections.push("");
+    if (changes.length > 0) {
+        sections.push("", "### How it was implemented");
+        for (const change of changes.slice(0, 6)) {
+            sections.push(change);
         }
     }
 
-    // Include current file analysis for full context
+    // Add understanding of current system state from file analysis
     for (const filePath of editedFiles.slice(0, 2)) {
         try {
             const content = fs.readFileSync(filePath, "utf-8");
             const analysis = analyzeFileContent(filePath, content);
-            if (analysis.summary) sections.push(analysis.summary);
+            if (analysis.summary) sections.push("", analysis.summary);
         } catch { /* file may not exist */ }
     }
 
@@ -942,40 +906,63 @@ function flushEnhanceSession(s: PluginState, buf: Observation[], editedFiles: st
     s.log(`[code-buddy] 📤 Sync flush: saved enhancement guide "${saved.title}"`);
 }
 
-/** Flush a build/create session — extract project structure and tech details. */
+/** Flush a build/create session — extract how the project works, not just what files exist. */
 function flushBuildSession(s: PluginState, buf: Observation[], editedFiles: string[]): void {
-    // Read actual file contents from disk to extract knowledge
-    const fileAnalyses: string[] = [];
+    const projectName = extractProjectName(buf, editedFiles);
+    const fileNames = editedFiles.map((f) => f.split("/").pop() || f);
+
+    // Read files and extract understanding
+    const analyses: string[] = [];
     const allTags: string[] = [];
 
     for (const filePath of editedFiles) {
         try {
             const content = fs.readFileSync(filePath, "utf-8");
             const analysis = analyzeFileContent(filePath, content);
-            if (analysis.summary) fileAnalyses.push(analysis.summary);
+            if (analysis.summary) analyses.push(analysis.summary);
             allTags.push(...analysis.tags);
         } catch {
             // File might have been deleted or moved
         }
     }
 
-    if (fileAnalyses.length === 0) return;
+    if (analyses.length === 0) return;
 
-    // Build title from project context
-    const projectName = extractProjectName(buf, editedFiles);
-    const fileNames = editedFiles.map((f) => f.split("/").pop() || f);
     const title = projectName
-        ? `${projectName} (${fileNames.join(", ")})`.substring(0, 60)
-        : `Build ${fileNames.join(", ")}`.substring(0, 60);
+        ? `${projectName}: how it works`.substring(0, 60)
+        : `${fileNames.join(", ")}: how it works`.substring(0, 60);
 
-    // Combine all file analyses into a structured guide
-    const guide = [
-        `## Project: ${projectName || fileNames.join(", ")}`,
-        `Files: ${editedFiles.join(", ")}`,
-        "",
-        ...fileAnalyses,
-    ].join("\n").substring(0, 2000);
+    // Build a guide focused on understanding, not inventory
+    const sections: string[] = [
+        `## ${projectName || fileNames.join(", ")}`,
+    ];
 
+    // Architecture decision
+    if (editedFiles.length === 1 && editedFiles[0].endsWith(".html")) {
+        sections.push("Architecture: Single-file app (all code in one HTML file)");
+    } else if (editedFiles.length > 1) {
+        sections.push(`Architecture: ${editedFiles.length} files (${fileNames.join(", ")})`);
+    }
+
+    // Add file-level understanding
+    sections.push("", ...analyses);
+
+    // Extract conventions from bash commands (test scripts, build tools, etc.)
+    const bashCommands = buf
+        .filter((o) => o.tool.toLowerCase().includes("bash") && o.args?.command)
+        .map((o) => String(o.args!.command));
+
+    if (bashCommands.length > 0) {
+        const devCmds = bashCommands.filter((c) =>
+            /npm|yarn|pnpm|test|build|serve|start|lint/i.test(c),
+        );
+        if (devCmds.length > 0) {
+            sections.push("", "### Dev workflow");
+            sections.push(...devCmds.slice(0, 3).map((c) => `- \`${c.substring(0, 80)}\``));
+        }
+    }
+
+    const guide = sections.join("\n").substring(0, 2000);
     const tags = [...new Set([...inferTags(buf, editedFiles), ...allTags])].slice(0, 8);
 
     const saved = saveMemoryWithSyncDedup(s, {
@@ -1017,7 +1004,11 @@ function extractProjectName(buf: Observation[], editedFiles: string[]): string {
     return "";
 }
 
-/** Analyze a file's content and extract structured technical details. */
+/**
+ * Analyze a file's content and extract **understanding** — how it works,
+ * what patterns it uses, what data structures drive it — NOT an inventory
+ * of names, colors, or byte counts.
+ */
 function analyzeFileContent(filePath: string, content: string): { summary: string; tags: string[] } {
     const ext = filePath.split(".").pop()?.toLowerCase() || "";
     const fileName = filePath.split("/").pop() || filePath;
@@ -1028,96 +1019,104 @@ function analyzeFileContent(filePath: string, content: string): { summary: strin
     if (ext === "json") return analyzeJSON(fileName, content);
     if (ext === "md") return analyzeMD(fileName, content);
 
-    return { summary: `File: ${fileName} (${content.length} bytes)`, tags: [] };
+    return { summary: "", tags: [] };
 }
 
 function analyzeHTML(fileName: string, content: string): { summary: string; tags: string[] } {
     const lines: string[] = [];
-    const tags: string[] = ["html"];
+    const tags: string[] = [];
 
-    // Title
+    // Project identity
     const title = content.match(/<title>(.+?)<\/title>/i);
-    if (title) lines.push(`Title: "${title[1]}"`);
+    if (title) lines.push(`Project: "${title[1]}"`);
 
-    // Architecture: single-file or multi-file
+    // Architecture decision — single-file vs multi-file (this is a design decision worth recording)
     const hasInlineCSS = /<style[\s>]/i.test(content);
     const hasInlineJS = /<script[\s>]/i.test(content);
     const externalCSS = content.match(/href="([^"]+\.css)"/gi) || [];
     const externalJS = content.match(/src="([^"]+\.js)"/gi) || [];
-    const arch: string[] = [];
     if (hasInlineCSS && hasInlineJS && externalCSS.length === 0 && externalJS.length === 0) {
-        arch.push("Single-file (embedded CSS + JS)");
-    } else {
-        if (hasInlineCSS) arch.push("inline CSS");
-        if (hasInlineJS) arch.push("inline JS");
-        if (externalCSS.length > 0) arch.push(`external CSS: ${externalCSS.join(", ")}`);
-        if (externalJS.length > 0) arch.push(`external JS: ${externalJS.join(", ")}`);
-    }
-    if (arch.length > 0) lines.push(`Architecture: ${arch.join(", ")}`);
-
-    // Canvas
-    const canvas = content.match(/<canvas[^>]*(?:width="(\d+)")[^>]*(?:height="(\d+)")?/i)
-        || content.match(/<canvas[^>]*>/i);
-    if (canvas) {
-        tags.push("html-canvas");
-        const w = canvas[1], h = canvas[2];
-        lines.push(`Canvas: ${w && h ? `${w}x${h}` : "dynamic size"}`);
+        lines.push("Architecture: Single-file app (all CSS + JS embedded in HTML)");
+        tags.push("single-file-app");
     }
 
-    // Fonts
-    const fonts = content.match(/family=([^"&]+)/g);
-    if (fonts) {
-        const fontNames = [...new Set(fonts.map((f) => decodeURIComponent(f.replace("family=", "")).replace(/\+/g, " ")))];
-        lines.push(`Fonts: ${fontNames.join(", ")}`);
+    // Core data structures — look for state initialization patterns
+    const statePatterns = content.match(/(?:let|const|var)\s+(\w+)\s*=\s*(\[[\s\S]{0,100}?\]|\{[\s\S]{0,100}?\}|new\s+\w+[\s\S]{0,60}?[;)\n])/g) || [];
+    const meaningfulState = statePatterns.filter((s) => {
+        // Skip trivial assignments like `const x = {}`
+        return s.length > 20 && !/=\s*\{\s*\}/.test(s) && !/=\s*\[\s*\]/.test(s);
+    });
+    if (meaningfulState.length > 0) {
+        const stateDesc = meaningfulState.slice(0, 3).map((s) => s.substring(0, 80).trim()).join("; ");
+        lines.push(`Core state: ${stateDesc}`);
+        tags.push("state-management");
     }
 
-    // Colors / theme
-    const bgColors = content.match(/background(?:-color)?:\s*(#[0-9a-f]{3,8}|rgb[^;)]+)/gi) || [];
-    const textColors = content.match(/(?:^|[\s;])color:\s*(#[0-9a-f]{3,8}|rgb[^;)]+)/gi) || [];
-    const allColors = [...new Set([...bgColors, ...textColors].map((c) => {
-        const m = c.match(/(#[0-9a-f]{3,8}|rgb[^;)]+\))/i);
-        return m ? m[1] : "";
-    }).filter(Boolean))];
-    if (allColors.length > 0) lines.push(`Colors: ${allColors.slice(0, 6).join(", ")}`);
-
-    // JS functions (key game/app logic)
-    const funcs = content.match(/function\s+(\w+)/g) || [];
-    const arrowFuncs = content.match(/(?:const|let)\s+(\w+)\s*=\s*(?:\([^)]*\)|[\w]+)\s*=>/g) || [];
-    const allFuncs = [
-        ...funcs.map((f) => f.replace("function ", "")),
-        ...arrowFuncs.map((f) => f.match(/(?:const|let)\s+(\w+)/)?.[1] || ""),
-    ].filter(Boolean);
-    if (allFuncs.length > 0) {
-        lines.push(`Key functions: ${allFuncs.slice(0, 12).join(", ")}`);
-        tags.push("vanilla-js");
-    }
-
-    // Event listeners (controls)
-    const events = content.match(/addEventListener\s*\(\s*['"](\w+)['"]/g) || [];
-    const eventTypes = [...new Set(events.map((e) => e.match(/['"](\w+)['"]/)?.[1] || ""))].filter(Boolean);
-    if (eventTypes.length > 0) lines.push(`Controls: ${eventTypes.join(", ")} events`);
-
-    // requestAnimationFrame (game loop)
+    // Game loop / update pattern — HOW the system updates, not just that it exists
     if (/requestAnimationFrame/i.test(content)) {
-        lines.push("Game loop: requestAnimationFrame");
+        const deltaTime = /delta|dt|elapsed|lastTime|previousTime/i.test(content);
+        lines.push(`Update loop: requestAnimationFrame${deltaTime ? " with delta-time" : " (fixed frame)"}`);
         tags.push("game-loop");
+    } else {
+        const intervals = content.match(/setInterval\s*\([^,]+,\s*(\d+)\)/);
+        if (intervals) {
+            lines.push(`Update loop: setInterval at ${intervals[1]}ms`);
+            tags.push("timer-based");
+        }
     }
 
-    // setInterval (alternative game loop)
-    const intervals = content.match(/setInterval\s*\([^,]+,\s*(\d+)\)/g);
-    if (intervals) lines.push(`Timer: setInterval (${intervals.length} timer(s))`);
+    // Movement / physics model
+    if (/velocity|speed|acceleration|dx|dy/i.test(content)) {
+        const gravity = /gravity|gravit/i.test(content);
+        lines.push(`Physics: velocity-based movement${gravity ? " with gravity" : ""}`);
+        tags.push("physics");
+    }
 
-    // Key game patterns
-    if (/collision|collide|intersect|hitTest/i.test(content)) {
-        lines.push("Collision detection: yes");
+    // Collision approach — HOW collisions work
+    if (/collision|collide|intersect|hitTest|overlap/i.test(content)) {
+        const bbox = /getBoundingClientRect|\.left|\.right|\.top|\.bottom|\.width|\.height/i.test(content);
+        const pixel = /getImageData|pixel/i.test(content);
+        const grid = /grid|cell|tile|board\[/i.test(content);
+        const approach = bbox ? "bounding-box" : pixel ? "pixel-perfect" : grid ? "grid/cell-based" : "custom";
+        lines.push(`Collision: ${approach} detection`);
         tags.push("collision-detection");
     }
-    if (/score/i.test(content)) tags.push("scoring");
-    if (/gameOver|game.over|game_over/i.test(content)) tags.push("game-state");
-    if (/localStorage/i.test(content)) tags.push("local-storage");
 
-    // File size
-    lines.push(`Total size: ${content.length} bytes, ~${content.split("\n").length} lines`);
+    // Input handling — what controls exist and how they map
+    const keyHandler = content.match(/addEventListener\s*\(\s*['"]key(down|up|press)['"]/gi);
+    const mouseHandler = content.match(/addEventListener\s*\(\s*['"](click|mouse\w+|touch\w+)['"]/gi);
+    const controls: string[] = [];
+    if (keyHandler) controls.push("keyboard");
+    if (mouseHandler) controls.push("mouse/touch");
+    if (/ArrowLeft|ArrowRight|ArrowUp|ArrowDown/i.test(content)) controls.push("arrow keys");
+    if (/['"](w|a|s|d)['"]/i.test(content) && /key/i.test(content)) controls.push("WASD");
+    if (controls.length > 0) lines.push(`Controls: ${controls.join(", ")}`);
+
+    // Canvas usage — dimensions matter for understanding coordinate system
+    const canvas = content.match(/<canvas[^>]*(?:width="(\d+)")[^>]*(?:height="(\d+)")?/i);
+    if (canvas && canvas[1] && canvas[2]) {
+        lines.push(`Canvas: ${canvas[1]}x${canvas[2]} coordinate space`);
+        tags.push("canvas-rendering");
+    } else if (/<canvas/i.test(content)) {
+        tags.push("canvas-rendering");
+    }
+
+    // Persistence — what gets saved and how
+    if (/localStorage/i.test(content)) {
+        const keys = content.match(/localStorage\.\w+Item\s*\(\s*['"]([^'"]+)['"]/g) || [];
+        const keyNames = [...new Set(keys.map((k) => k.match(/['"]([^'"]+)['"]/)?.[1] || ""))].filter(Boolean);
+        lines.push(`Persistence: localStorage${keyNames.length > 0 ? ` (keys: ${keyNames.join(", ")})` : ""}`);
+    }
+
+    // Rendering approach — DOM vs canvas
+    if (/<canvas/i.test(content) && /\.getContext|ctx\./i.test(content)) {
+        lines.push("Rendering: canvas 2D context (direct draw calls)");
+    } else if (/innerHTML|appendChild|createElement|\.textContent/i.test(content)) {
+        lines.push("Rendering: DOM manipulation");
+        tags.push("dom-rendering");
+    }
+
+    if (lines.length === 0) return { summary: "", tags: [] };
 
     return {
         summary: `### ${fileName}\n${lines.join("\n")}`,
@@ -1127,36 +1126,106 @@ function analyzeHTML(fileName: string, content: string): { summary: string; tags
 
 function analyzeCSS(fileName: string, content: string): { summary: string; tags: string[] } {
     const lines: string[] = [];
-    const tags: string[] = ["css"];
+    const tags: string[] = [];
 
-    const selectors = content.match(/[.#][\w-]+/g) || [];
-    const uniqueSelectors = [...new Set(selectors)];
-    if (uniqueSelectors.length > 0) lines.push(`Key selectors: ${uniqueSelectors.slice(0, 10).join(", ")}`);
+    // Layout strategy — the architectural decision, not a list of selectors
+    const hasGrid = /display:\s*grid/i.test(content);
+    const hasFlex = /display:\s*flex/i.test(content);
+    if (hasGrid && hasFlex) {
+        lines.push("Layout: CSS Grid for main structure, Flexbox for component alignment");
+        tags.push("css-grid", "flexbox");
+    } else if (hasGrid) {
+        // Extract grid template to understand the board/layout shape
+        const template = content.match(/grid-template-columns:\s*([^;]+)/i);
+        if (template) lines.push(`Layout: CSS Grid (${template[1].trim().substring(0, 60)})`);
+        else lines.push("Layout: CSS Grid");
+        tags.push("css-grid");
+    } else if (hasFlex) {
+        lines.push("Layout: Flexbox");
+        tags.push("flexbox");
+    }
 
-    if (/display:\s*grid/i.test(content)) { lines.push("Layout: CSS Grid"); tags.push("css-grid"); }
-    if (/display:\s*flex/i.test(content)) { lines.push("Layout: Flexbox"); tags.push("flexbox"); }
-    if (/@keyframes/i.test(content)) { lines.push("Animations: CSS keyframes"); tags.push("css-animations"); }
-    if (/@media/i.test(content)) lines.push("Responsive: media queries");
-    if (/--[\w-]+:/i.test(content)) lines.push("CSS variables: yes");
+    // Animation approach — what animates and how
+    const keyframes = content.match(/@keyframes\s+(\w[\w-]*)/g) || [];
+    if (keyframes.length > 0) {
+        const names = keyframes.map((k) => k.replace("@keyframes ", ""));
+        lines.push(`Animations: ${names.join(", ")} (CSS keyframes)`);
+        tags.push("css-animations");
+    }
+    const transitions = content.match(/transition:\s*([^;]+)/gi) || [];
+    if (transitions.length > 0 && keyframes.length === 0) {
+        lines.push("Animations: CSS transitions");
+    }
+
+    // Theming approach — CSS variables indicate a theming system
+    const vars = content.match(/--[\w-]+:/g) || [];
+    if (vars.length >= 3) {
+        const varNames = vars.slice(0, 5).map((v) => v.replace(":", ""));
+        lines.push(`Theming: CSS custom properties (${varNames.join(", ")})`);
+        tags.push("css-variables");
+    }
+
+    // Responsive design
+    const mediaQueries = content.match(/@media[^{]+/g) || [];
+    if (mediaQueries.length > 0) {
+        lines.push(`Responsive: ${mediaQueries.length} breakpoint(s)`);
+    }
+
+    if (lines.length === 0) return { summary: "", tags: [] };
 
     return { summary: `### ${fileName}\n${lines.join("\n")}`, tags };
 }
 
 function analyzeJS(fileName: string, content: string): { summary: string; tags: string[] } {
     const lines: string[] = [];
-    const tags: string[] = ["javascript"];
+    const tags: string[] = [];
 
-    const funcs = content.match(/(?:function\s+(\w+)|(?:const|let)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[\w]+)\s*=>)/g) || [];
-    if (funcs.length > 0) lines.push(`Functions: ${funcs.slice(0, 10).map((f) => f.match(/(\w+)/)?.[1]).filter(Boolean).join(", ")}`);
-
+    // Architecture pattern — classes vs functional, modules vs scripts
     const classes = content.match(/class\s+(\w+)/g) || [];
+    const imports = content.match(/import\s+.+from\s+['"]([^'"]+)['"]/g) || [];
     if (classes.length > 0) {
-        lines.push(`Classes: ${classes.map((c) => c.replace("class ", "")).join(", ")}`);
-        tags.push("oop");
+        const names = classes.map((c) => c.replace("class ", ""));
+        lines.push(`Architecture: class-based (${names.join(", ")})`);
+        tags.push("class-based");
+    }
+    if (imports.length > 0) {
+        const externals = imports
+            .map((i) => i.match(/from\s+['"]([^'"]+)['"]/)?.[1] || "")
+            .filter((m) => m && !m.startsWith("."));
+        if (externals.length > 0) lines.push(`Dependencies: ${externals.join(", ")}`);
     }
 
-    const imports = content.match(/import\s+.+from\s+['"]([^'"]+)['"]/g) || [];
-    if (imports.length > 0) lines.push(`Imports: ${imports.slice(0, 5).join(", ")}`);
+    // State management pattern
+    if (/createContext|useContext/i.test(content)) {
+        lines.push("State: React Context");
+        tags.push("react-context");
+    } else if (/useReducer|dispatch/i.test(content)) {
+        lines.push("State: reducer pattern (dispatch/action)");
+        tags.push("reducer-pattern");
+    } else if (/useState/i.test(content)) {
+        lines.push("State: React useState hooks");
+        tags.push("react-hooks");
+    } else if (/createStore|configureStore/i.test(content)) {
+        lines.push("State: Redux store");
+        tags.push("redux");
+    }
+
+    // Data flow pattern
+    if (/fetch\s*\(|axios|XMLHttpRequest/i.test(content)) {
+        lines.push("Data: fetches from external API");
+        tags.push("api-client");
+    }
+    if (/export\s+(default\s+)?function|module\.exports/i.test(content)) {
+        tags.push("modular");
+    }
+
+    // Error handling approach
+    const tryCatch = (content.match(/try\s*\{/g) || []).length;
+    if (tryCatch >= 2) {
+        lines.push(`Error handling: ${tryCatch} try/catch blocks`);
+    }
+
+    if (lines.length === 0) return { summary: "", tags: [] };
 
     return { summary: `### ${fileName}\n${lines.join("\n")}`, tags };
 }
@@ -1164,20 +1233,27 @@ function analyzeJS(fileName: string, content: string): { summary: string; tags: 
 function analyzeJSON(fileName: string, content: string): { summary: string; tags: string[] } {
     try {
         const obj = JSON.parse(content);
-        const keys = Object.keys(obj).slice(0, 8);
-        const lines = [`Top-level keys: ${keys.join(", ")}`];
-        if (obj.name) lines.push(`Name: ${obj.name}`);
-        if (obj.dependencies) lines.push(`Dependencies: ${Object.keys(obj.dependencies).join(", ")}`);
+        const lines: string[] = [];
+
+        // Only record what's useful for understanding the project
+        if (obj.name) lines.push(`Project: ${obj.name}`);
+        if (obj.dependencies) {
+            const deps = Object.keys(obj.dependencies);
+            lines.push(`Stack: ${deps.join(", ")}`);
+        }
+        if (obj.scripts) {
+            const scriptNames = Object.keys(obj.scripts);
+            lines.push(`Available scripts: ${scriptNames.join(", ")}`);
+        }
+
+        if (lines.length === 0) return { summary: "", tags: [] };
         return { summary: `### ${fileName}\n${lines.join("\n")}`, tags: ["config"] };
     } catch {
-        return { summary: `### ${fileName}\nJSON config file`, tags: ["config"] };
+        return { summary: "", tags: [] };
     }
 }
 
-function analyzeMD(fileName: string, content: string): { summary: string; tags: string[] } {
-    const headings = content.match(/^#+\s+.+$/gm) || [];
-    const lines = headings.length > 0
-        ? [`Sections: ${headings.slice(0, 6).map((h) => h.replace(/^#+\s+/, "")).join(", ")}`]
-        : [`Markdown doc (${content.split("\n").length} lines)`];
-    return { summary: `### ${fileName}\n${lines.join("\n")}`, tags: ["docs"] };
+function analyzeMD(fileName: string, _content: string): { summary: string; tags: string[] } {
+    // Markdown files are documentation — the content IS the understanding, no need to re-extract
+    return { summary: "", tags: ["docs"] };
 }
