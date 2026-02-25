@@ -1,33 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { calculateSimilarity, calculateGuideRelevance, toWords } from "../helpers";
-
-describe("toWords", () => {
-    it("splits camelCase into separate words", () => {
-        const words = toWords("drawBoard moveSnake startGame");
-        expect(words.has("draw")).toBe(true);
-        expect(words.has("board")).toBe(true);
-        expect(words.has("move")).toBe(true);
-        expect(words.has("snake")).toBe(true);
-        expect(words.has("start")).toBe(true);
-        expect(words.has("game")).toBe(true);
-        // Original joined tokens should NOT be present
-        expect(words.has("drawboard")).toBe(false);
-        expect(words.has("movesnake")).toBe(false);
-    });
-
-    it("splits PascalCase and acronym boundaries", () => {
-        const words = toWords("HTMLParser XMLElement");
-        expect(words.has("html")).toBe(true);
-        expect(words.has("parser")).toBe(true);
-        expect(words.has("xml")).toBe(true);
-        expect(words.has("element")).toBe(true);
-    });
-
-    it("filters stop words and short words as before", () => {
-        const words = toWords("auto observed the file I am");
-        expect(words.size).toBe(0);
-    });
-});
+import { calculateSimilarity, calculateGuideRelevance } from "../helpers";
 
 describe("calculateSimilarity", () => {
     it("returns 1.0 for identical texts", () => {
@@ -73,10 +45,11 @@ describe("calculateSimilarity", () => {
         expect(score1).toBe(score2);
     });
 
-    it("matches camelCase words against their split components", () => {
-        // "drawBoard" splits to "draw" + "board", matching "draw board" in the other text
+    it("does NOT split camelCase — preserves dedup safety", () => {
+        // camelCase tokens should stay joined so different projects sharing
+        // common patterns (drawBoard, startGame) don't false-match in dedup
         const score = calculateSimilarity("drawBoard moveSnake", "draw board move snake");
-        expect(score).toBe(1);
+        expect(score).toBe(0); // "drawboard" ≠ "draw", "movesnake" ≠ "move"
     });
 
     it("returns partial overlap score for shared words", () => {
@@ -108,6 +81,17 @@ describe("calculateSimilarity", () => {
         const text2 = "snake game canvas dropdown modal button header footer";
         const score = calculateSimilarity(text1, text2);
         expect(score).toBeLessThan(0.55);
+    });
+
+    it("keeps different projects below dedup threshold despite shared patterns", () => {
+        // Snake and Tetris share common function-name patterns — without camelCase
+        // splitting, the joined tokens (drawboard, startgame, etc.) stay unique to
+        // each context and don't inflate the score.
+        const snake = "Snake game drawBoard moveSnake startGame gameLoop checkCollision updateScore";
+        const tetris = "Tetris game drawBoard movePiece startGame gameLoop checkLines updateScore";
+        const score = calculateSimilarity(snake, tetris);
+        // Should stay below async dedup threshold (0.65)
+        expect(score).toBeLessThan(0.65);
     });
 });
 

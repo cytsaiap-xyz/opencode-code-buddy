@@ -56,8 +56,19 @@ const SIMILARITY_STOP_WORDS = new Set([
     "points", "remove", "duplicates",
 ]);
 
-/** Tokenise text into a word set: split camelCase, strip punctuation, filter noise. */
-export function toWords(t: string): Set<string> {
+/** Tokenise text into a word set: strip punctuation, filter noise. No camelCase splitting. */
+function toWords(t: string): Set<string> {
+    return new Set(
+        t
+            .toLowerCase()
+            .replace(/[^\w\s]/g, "")
+            .split(/\s+/)
+            .filter((w) => w.length > 2 && !SIMILARITY_STOP_WORDS.has(w)),
+    );
+}
+
+/** Tokenise with camelCase/PascalCase splitting — only for guide matching queries. */
+function toWordsWithCamelSplit(t: string): Set<string> {
     return new Set(
         t
             // Split camelCase/PascalCase BEFORE lowercasing (e.g. drawBoard → draw Board)
@@ -85,14 +96,18 @@ export function calculateSimilarity(text1: string, text2: string): number {
 }
 
 /**
- * Overlap coefficient — good for asymmetric comparisons (guide matching:
- * short search query vs long memory content).
+ * Overlap coefficient with camelCase splitting — for guide matching only
+ * (short search query vs long memory content).
  * Formula: intersection / min(|A|, |B|)
- * Measures what fraction of the smaller set overlaps with the larger set.
+ *
+ * CamelCase splitting is applied so function names from code (drawBoard,
+ * moveSnake) match separate words in memory content ("draw board", "snake").
+ * This is intentionally NOT used for dedup — camelCase splitting inflates
+ * scores between different projects that share common patterns.
  */
 export function calculateGuideRelevance(query: string, document: string): number {
-    const a = toWords(query);
-    const b = toWords(document);
+    const a = toWordsWithCamelSplit(query);
+    const b = toWordsWithCamelSplit(document);
     if (a.size === 0 || b.size === 0) return 0;
 
     let intersection = 0;
