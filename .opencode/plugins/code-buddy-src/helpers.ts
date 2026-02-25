@@ -56,15 +56,22 @@ const SIMILARITY_STOP_WORDS = new Set([
     "points", "remove", "duplicates",
 ]);
 
-export function calculateSimilarity(text1: string, text2: string): number {
-    const toWords = (t: string) =>
-        new Set(
-            t.toLowerCase()
-                .replace(/[^\w\s]/g, "")
-                .split(/\s+/)
-                .filter((w) => w.length > 2 && !SIMILARITY_STOP_WORDS.has(w)),
-        );
+/** Tokenise text into a word set: split camelCase, strip punctuation, filter noise. */
+export function toWords(t: string): Set<string> {
+    return new Set(
+        t
+            // Split camelCase/PascalCase BEFORE lowercasing (e.g. drawBoard → draw Board)
+            .replace(/([a-z])([A-Z])/g, "$1 $2")
+            .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+            .toLowerCase()
+            .replace(/[^\w\s]/g, "")
+            .split(/\s+/)
+            .filter((w) => w.length > 2 && !SIMILARITY_STOP_WORDS.has(w)),
+    );
+}
 
+/** Jaccard similarity — good for symmetric comparisons (dedup: similar-length texts). */
+export function calculateSimilarity(text1: string, text2: string): number {
     const a = toWords(text1);
     const b = toWords(text2);
     if (a.size === 0 || b.size === 0) return 0;
@@ -75,6 +82,25 @@ export function calculateSimilarity(text1: string, text2: string): number {
     }
     const union = a.size + b.size - intersection;
     return union > 0 ? intersection / union : 0;
+}
+
+/**
+ * Overlap coefficient — good for asymmetric comparisons (guide matching:
+ * short search query vs long memory content).
+ * Formula: intersection / min(|A|, |B|)
+ * Measures what fraction of the smaller set overlaps with the larger set.
+ */
+export function calculateGuideRelevance(query: string, document: string): number {
+    const a = toWords(query);
+    const b = toWords(document);
+    if (a.size === 0 || b.size === 0) return 0;
+
+    let intersection = 0;
+    for (const w of a) {
+        if (b.has(w)) intersection++;
+    }
+    const minSize = Math.min(a.size, b.size);
+    return minSize > 0 ? intersection / minSize : 0;
 }
 
 // ---- Date formatting ----

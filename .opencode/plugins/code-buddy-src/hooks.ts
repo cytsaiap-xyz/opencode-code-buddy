@@ -9,7 +9,7 @@
 import * as fs from "node:fs";
 import type { MemoryType, ErrorType, Observation } from "./types";
 import { MEMORY_TYPE_CATEGORY, VALID_MEMORY_TYPES } from "./types";
-import { generateId, formatTime, nowTimestamp, searchText, calculateSimilarity } from "./helpers";
+import { generateId, formatTime, nowTimestamp, searchText, calculateSimilarity, calculateGuideRelevance } from "./helpers";
 import { detectSessionType, saveMemoryWithSyncDedup } from "./dedup";
 import { askAI, addMemoryWithDedup, extractJSON, extractJSONArray } from "./llm";
 import type { PluginState } from "./state";
@@ -40,6 +40,8 @@ export function createHooks(s: PluginState) {
     let flushState: "idle" | "started" | "completed" = "idle";
     // Track whether we've injected relevant guides yet this session
     let guidesInjected = false;
+    let guideMatchAttempts = 0;
+    const MAX_GUIDE_MATCH_ATTEMPTS = 3;
 
     const flushObservations = async (reason: string) => {
         if (flushState !== "idle" || s.observationBuffer.length === 0) return;
@@ -142,10 +144,11 @@ export function createHooks(s: PluginState) {
 
             s.log(`[code-buddy] 👁️ Observed: ${input.tool}${fileEdited ? ` → ${fileEdited}` : ""}${isWriteAction ? " [write]" : ""} (title: ${output.title || "none"})`);
 
-            // Inject relevant project guides on the first write action
-            // (that's when we know what the agent is building and have meaningful context)
-            if (!guidesInjected && isWriteAction && s.memories.length > 0) {
-                guidesInjected = true;
+            // Inject relevant project guides on write actions.
+            // Retry up to MAX_GUIDE_MATCH_ATTEMPTS times — the first write may be a config
+            // file with poor context, so allow later, more informative writes to match.
+            if (!guidesInjected && isWriteAction && s.memories.length > 0 && guideMatchAttempts < MAX_GUIDE_MATCH_ATTEMPTS) {
+                guideMatchAttempts++;
 
                 // Extract key identifiers from the file content for search
                 const fileContent = String(inputArgs.content || "");
@@ -167,14 +170,14 @@ export function createHooks(s: PluginState) {
                 if (inputArgs.command) searchParts.push(String(inputArgs.command));
 
                 const searchCtx = searchParts.join(" ");
-                s.log(`[code-buddy] 📚 Searching ${s.memories.length} memories for guides (context: "${searchCtx.substring(0, 80)}")`);
+                s.log(`[code-buddy] 📚 Searching ${s.memories.length} memories for guides (attempt ${guideMatchAttempts}/${MAX_GUIDE_MATCH_ATTEMPTS}, context: "${searchCtx.substring(0, 80)}")`);
 
-                // Use Jaccard similarity to find relevant guides (threshold 0.15 — loose match for guide discovery)
+                // Use overlap coefficient for guide discovery — handles asymmetric lengths
+                // (short search query vs long memory content) much better than Jaccard.
                 const guides = s.memories
-                    .filter((m) => m.type === "feature" || m.type === "pattern")
                     .map((m) => ({
                         memory: m,
-                        score: calculateSimilarity(searchCtx, `${m.title} ${m.content}`),
+                        score: calculateGuideRelevance(searchCtx, `${m.title} ${m.content}`),
                     }))
                     .filter((r) => r.score >= 0.15)
                     .sort((a, b) => b.score - a.score)
@@ -184,6 +187,7 @@ export function createHooks(s: PluginState) {
                 s.log(`[code-buddy] 📚 Found ${guides.length} matching guide(s)`);
 
                 if (guides.length > 0) {
+                    guidesInjected = true;
                     let guideBlock = "\n\n---\n📚 **Relevant project guides from memory:**\n";
                     for (const g of guides) {
                         guideBlock += `\n### ${g.title}\n${g.content.substring(0, 800)}\n`;

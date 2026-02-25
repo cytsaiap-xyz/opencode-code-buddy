@@ -1,5 +1,33 @@
 import { describe, it, expect } from "vitest";
-import { calculateSimilarity } from "../helpers";
+import { calculateSimilarity, calculateGuideRelevance, toWords } from "../helpers";
+
+describe("toWords", () => {
+    it("splits camelCase into separate words", () => {
+        const words = toWords("drawBoard moveSnake startGame");
+        expect(words.has("draw")).toBe(true);
+        expect(words.has("board")).toBe(true);
+        expect(words.has("move")).toBe(true);
+        expect(words.has("snake")).toBe(true);
+        expect(words.has("start")).toBe(true);
+        expect(words.has("game")).toBe(true);
+        // Original joined tokens should NOT be present
+        expect(words.has("drawboard")).toBe(false);
+        expect(words.has("movesnake")).toBe(false);
+    });
+
+    it("splits PascalCase and acronym boundaries", () => {
+        const words = toWords("HTMLParser XMLElement");
+        expect(words.has("html")).toBe(true);
+        expect(words.has("parser")).toBe(true);
+        expect(words.has("xml")).toBe(true);
+        expect(words.has("element")).toBe(true);
+    });
+
+    it("filters stop words and short words as before", () => {
+        const words = toWords("auto observed the file I am");
+        expect(words.size).toBe(0);
+    });
+});
 
 describe("calculateSimilarity", () => {
     it("returns 1.0 for identical texts", () => {
@@ -45,26 +73,22 @@ describe("calculateSimilarity", () => {
         expect(score1).toBe(score2);
     });
 
+    it("matches camelCase words against their split components", () => {
+        // "drawBoard" splits to "draw" + "board", matching "draw board" in the other text
+        const score = calculateSimilarity("drawBoard moveSnake", "draw board move snake");
+        expect(score).toBe(1);
+    });
+
     it("returns partial overlap score for shared words", () => {
-        // Craft: 5 shared words out of 9 unique (after stop word filtering)
-        // shared: alpha, bravo, charlie, delta, echo (all >2 chars, not stop words)
         const shared = "alpha bravo charlie delta echo";
         const text1 = `${shared} foxtrot golf hotel india`;
         const text2 = `${shared} juliet kilo lima mike`;
-        // intersection = 5, union = 5 + 4 + 4 - 5 = 9? No: set1 = {alpha,bravo,charlie,delta,echo,foxtrot,golf,hotel,india} (9), set2 = {alpha,bravo,charlie,delta,echo,juliet,kilo,lima,mike} (9)
-        // intersection = 5, union = 9 + 9 - 5 = 13... wait, that's wrong. union = |A ∪ B| = |A| + |B| - |A ∩ B| = 9 + 9 - 5 = 13
-        // But wait, each set has 9 unique words. union = 13. score = 5/13 ≈ 0.385
-        // Hmm, need to recalculate. Let me use different numbers.
         const score = calculateSimilarity(text1, text2);
         expect(score).toBeGreaterThan(0);
         expect(score).toBeLessThan(1);
     });
 
     it("scores in sync dedup range (>= 0.55) for similar project descriptions", () => {
-        // 6 shared out of 10 unique words total
-        // set1 = {snake, game, canvas, rendering, neon, theme, collision, detection} = 8 words
-        // set2 = {snake, game, canvas, rendering, neon, theme, score, board} = 8 words
-        // intersection = 6, union = 8 + 8 - 6 = 10, score = 6/10 = 0.6
         const text1 = "snake game canvas rendering neon theme collision detection";
         const text2 = "snake game canvas rendering neon theme score board";
         const score = calculateSimilarity(text1, text2);
@@ -73,10 +97,6 @@ describe("calculateSimilarity", () => {
     });
 
     it("scores above async threshold (>= 0.65) for very similar texts", () => {
-        // 7 shared out of 9 unique
-        // set1 = {snake, game, canvas, rendering, neon, theme, movement, logic} = 8
-        // set2 = {snake, game, canvas, rendering, neon, theme, movement, controls} = 8
-        // intersection = 7, union = 8 + 8 - 7 = 9, score = 7/9 ≈ 0.778
         const text1 = "snake game canvas rendering neon theme movement logic";
         const text2 = "snake game canvas rendering neon theme movement controls";
         const score = calculateSimilarity(text1, text2);
@@ -84,13 +104,84 @@ describe("calculateSimilarity", () => {
     });
 
     it("scores below sync threshold (< 0.55) for loosely related texts", () => {
-        // 3 shared out of ~10+ unique
-        // set1 = {snake, game, canvas, rendering, animation, loop, physics} = 7
-        // set2 = {snake, game, canvas, dropdown, modal, button, header, footer} = 8
-        // intersection = 3, union = 7 + 8 - 3 = 12, score = 3/12 = 0.25
         const text1 = "snake game canvas rendering animation loop physics";
         const text2 = "snake game canvas dropdown modal button header footer";
         const score = calculateSimilarity(text1, text2);
         expect(score).toBeLessThan(0.55);
+    });
+});
+
+describe("calculateGuideRelevance", () => {
+    it("returns 1.0 for identical texts", () => {
+        const text = "snake game canvas rendering";
+        expect(calculateGuideRelevance(text, text)).toBe(1);
+    });
+
+    it("returns 0 for completely different texts", () => {
+        expect(calculateGuideRelevance(
+            "react component pipeline",
+            "database migration scripts",
+        )).toBe(0);
+    });
+
+    it("returns 0 for empty inputs", () => {
+        expect(calculateGuideRelevance("", "some content")).toBe(0);
+        expect(calculateGuideRelevance("some content", "")).toBe(0);
+        expect(calculateGuideRelevance("", "")).toBe(0);
+    });
+
+    it("handles short query vs long document — the key fix", () => {
+        // This is the exact scenario that was broken: a short search context from the
+        // first write action compared against a long memory content.
+        const shortQuery = "index.html Snake Game drawBoard moveSnake startGame gameLoop";
+        const longMemory = "Snake game: CSS grid board with neon theme. Single HTML file with embedded CSS and JS. " +
+            "Uses requestAnimationFrame for game loop. Snake movement via coordinate array tracking x,y positions. " +
+            "Food spawns on random empty cells. Collision detection against walls and body segments. " +
+            "Score display updated on each food pickup. Neon green theme with dark background.";
+
+        const relevance = calculateGuideRelevance(shortQuery, longMemory);
+        const jaccard = calculateSimilarity(shortQuery, longMemory);
+
+        // Overlap coefficient should score well above 0.15 threshold
+        expect(relevance).toBeGreaterThanOrEqual(0.15);
+        // Jaccard would have failed (score too low due to union inflation)
+        expect(jaccard).toBeLessThan(0.15);
+    });
+
+    it("scores higher than Jaccard for asymmetric lengths", () => {
+        const query = "snake game canvas";
+        const document = "snake game canvas rendering neon theme collision detection movement controls scoring food spawn";
+
+        const relevance = calculateGuideRelevance(query, document);
+        const jaccard = calculateSimilarity(query, document);
+
+        // Overlap: 3/3 = 1.0 (all query words found in document)
+        // Jaccard: 3/12 = 0.25 (diluted by document length)
+        expect(relevance).toBeGreaterThan(jaccard);
+        expect(relevance).toBe(1); // all query words present in document
+    });
+
+    it("scores proportionally to query word coverage", () => {
+        const document = "snake game canvas rendering neon theme";
+
+        // 2 out of 4 query words match → ~0.5
+        const score1 = calculateGuideRelevance("snake game react database", document);
+        // 3 out of 4 query words match → ~0.75
+        const score2 = calculateGuideRelevance("snake game canvas database", document);
+
+        expect(score2).toBeGreaterThan(score1);
+        expect(score1).toBeCloseTo(0.5, 1);
+        expect(score2).toBeCloseTo(0.75, 1);
+    });
+
+    it("benefits from camelCase splitting for function name matching", () => {
+        const query = "drawBoard moveSnake startGame";
+        const document = "Snake game with draw board function. Move snake across grid. Start game initializes state.";
+
+        const relevance = calculateGuideRelevance(query, document);
+        // After camelCase split: query has {draw, board, move, snake, start, game}
+        // Document has {snake, game, draw, board, function, move, across, grid, start, initializes, state}
+        // All 6 query words found in document → 6/6 = 1.0
+        expect(relevance).toBe(1);
     });
 });
