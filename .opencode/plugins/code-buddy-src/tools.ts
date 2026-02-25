@@ -351,7 +351,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
 
                 let msg = `## 🔍 Search Results for "${args.query}" (${results.length})\n\n`;
                 for (const m of results) {
-                    msg += `### ${m.title}\n- **Type**: ${m.type}\n- **Date**: ${formatDate(m.timestamp)}\n- **Tags**: ${m.tags.join(", ")}\n\n${m.content.substring(0, 150)}...\n\n---\n\n`;
+                    msg += `### ${m.title}\n- **Type**: ${m.type}\n- **Date**: ${formatDate(m.timestamp)}\n- **Tags**: ${m.tags.join(", ")}\n\n${m.content}\n\n---\n\n`;
                 }
                 return msg;
             },

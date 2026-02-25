@@ -9,7 +9,7 @@
 import * as fs from "node:fs";
 import type { MemoryType, ErrorType, Observation } from "./types";
 import { MEMORY_TYPE_CATEGORY, VALID_MEMORY_TYPES } from "./types";
-import { generateId, formatTime, nowTimestamp } from "./helpers";
+import { generateId, formatTime, nowTimestamp, searchText, calculateSimilarity } from "./helpers";
 import { detectSessionType, saveMemoryWithSyncDedup } from "./dedup";
 import { askAI, addMemoryWithDedup, extractJSON, extractJSONArray } from "./llm";
 import type { PluginState } from "./state";
@@ -38,6 +38,8 @@ function isWriteTool(toolName: string): boolean {
 export function createHooks(s: PluginState) {
     // Track flush state: "idle" → "started" → "completed"
     let flushState: "idle" | "started" | "completed" = "idle";
+    // Track whether we've injected relevant guides yet this session
+    let guidesInjected = false;
 
     const flushObservations = async (reason: string) => {
         if (flushState !== "idle" || s.observationBuffer.length === 0) return;
@@ -139,6 +141,58 @@ export function createHooks(s: PluginState) {
             });
 
             s.log(`[code-buddy] 👁️ Observed: ${input.tool}${fileEdited ? ` → ${fileEdited}` : ""}${isWriteAction ? " [write]" : ""} (title: ${output.title || "none"})`);
+
+            // Inject relevant project guides on the first write action
+            // (that's when we know what the agent is building and have meaningful context)
+            if (!guidesInjected && isWriteAction && s.memories.length > 0) {
+                guidesInjected = true;
+
+                // Extract key identifiers from the file content for search
+                const fileContent = String(inputArgs.content || "");
+                const searchParts: string[] = [];
+
+                // Extract HTML <title>
+                const titleMatch = fileContent.match(/<title>(.+?)<\/title>/i);
+                if (titleMatch) searchParts.push(titleMatch[1]);
+
+                // Extract file name
+                if (fileEdited) searchParts.push(fileEdited.split("/").pop() || "");
+
+                // Extract function names (key identifiers)
+                const funcNames = fileContent.match(/function\s+(\w+)/g);
+                if (funcNames) searchParts.push(...funcNames.slice(0, 8).map((f) => f.replace("function ", "")));
+
+                // Extract key game/app terms from title and output
+                if (output.title) searchParts.push(output.title);
+                if (inputArgs.command) searchParts.push(String(inputArgs.command));
+
+                const searchCtx = searchParts.join(" ");
+                s.log(`[code-buddy] 📚 Searching ${s.memories.length} memories for guides (context: "${searchCtx.substring(0, 80)}")`);
+
+                // Use Jaccard similarity to find relevant guides (threshold 0.15 — loose match for guide discovery)
+                const guides = s.memories
+                    .filter((m) => m.type === "feature" || m.type === "pattern")
+                    .map((m) => ({
+                        memory: m,
+                        score: calculateSimilarity(searchCtx, `${m.title} ${m.content}`),
+                    }))
+                    .filter((r) => r.score >= 0.15)
+                    .sort((a, b) => b.score - a.score)
+                    .slice(0, 2)
+                    .map((r) => r.memory);
+
+                s.log(`[code-buddy] 📚 Found ${guides.length} matching guide(s)`);
+
+                if (guides.length > 0) {
+                    let guideBlock = "\n\n---\n📚 **Relevant project guides from memory:**\n";
+                    for (const g of guides) {
+                        guideBlock += `\n### ${g.title}\n${g.content.substring(0, 800)}\n`;
+                    }
+                    guideBlock += "\n---";
+                    output.output += guideBlock;
+                    s.log(`[code-buddy] 📚 Injected ${guides.length} relevant guide(s) into tool output`);
+                }
+            }
         },
 
         // ---- session.compacting: inject memories/mistakes/entities into context ----
@@ -152,13 +206,15 @@ export function createHooks(s: PluginState) {
             let block = "## Code Buddy Context (Auto-Injected)\n\n";
 
             if (recentMemories.length > 0) {
-                block += "### Recent Memories\n";
-                block += recentMemories.map((m) => `- [${m.type}] ${m.title}: ${m.content.substring(0, 80)}`).join("\n");
-                block += "\n\n";
+                block += "### Project Guides & Memories\n";
+                for (const m of recentMemories) {
+                    block += `\n#### [${m.type}] ${m.title}\n${m.content.substring(0, 500)}\n`;
+                }
+                block += "\n";
             }
             if (recentMistakes.length > 0) {
                 block += "### Known Issues (Avoid Repeating)\n";
-                block += recentMistakes.map((m) => `- ⚠️ ${m.action} → Solution: ${m.correctMethod.substring(0, 80)}`).join("\n");
+                block += recentMistakes.map((m) => `- ⚠️ ${m.action} → Solution: ${m.correctMethod.substring(0, 200)}`).join("\n");
                 block += "\n\n";
             }
             if (topEntities.length > 0) {
@@ -167,7 +223,7 @@ export function createHooks(s: PluginState) {
                 block += "\n\n";
             }
 
-            block += "Use `buddy_remember` to recall more details if needed.";
+            block += "Use `buddy_remember(query)` to search for more details.";
             output.context.push(block);
 
             const total = recentMemories.length + recentMistakes.length + topEntities.length;
