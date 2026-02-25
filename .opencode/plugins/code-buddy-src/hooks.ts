@@ -398,10 +398,23 @@ function classifyIntent(buf: Observation[], editedFiles: string[], hasErrors: bo
 
     if (hasErrors && errorCount >= 2) return { intent: "debugging", type: "bugfix" };
     if (hasErrors && editedFiles.length > 0) return { intent: "debugging", type: "bugfix" };
-    if (editedFiles.length >= 3) return { intent: "refactoring", type: "pattern" };
-    if (editedFiles.length > 0 && writeCount > readCount) return { intent: "task-execution", type: "feature" };
     if (readCount > writeCount * 2) return { intent: "exploration", type: "note" };
-    return { intent: "task-execution", type: editedFiles.length > 0 ? "feature" : "note" };
+
+    // Distinguish building (creating new files) from refactoring (small edits across many files).
+    // "Write" tools create/overwrite entire files; "Edit" tools make targeted changes.
+    if (editedFiles.length >= 3) {
+        const createCount = buf.filter((o) =>
+            o.isWriteAction && /write|create/i.test(o.tool),
+        ).length;
+        const editCount = buf.filter((o) =>
+            o.isWriteAction && /edit|replace|patch/i.test(o.tool),
+        ).length;
+        // If mostly creating files → building; if mostly editing → refactoring
+        if (editCount > createCount) return { intent: "refactoring", type: "pattern" };
+    }
+
+    if (editedFiles.length > 0) return { intent: "task-execution", type: "feature" };
+    return { intent: "task-execution", type: "note" };
 }
 
 /**
