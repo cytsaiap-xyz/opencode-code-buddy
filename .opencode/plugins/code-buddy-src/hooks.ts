@@ -472,7 +472,7 @@ function buildFallbackEntries(
 
         if (analyses.length > 0) {
             // Join the structural insights into a readable summary
-            summary = analyses.slice(0, 6).join(". ").replace(/\.\./g, ".");
+            summary = analyses.slice(0, 10).join(". ").replace(/\.\./g, ".");
         } else {
             // No file-level insights — try bash command descriptions
             const cmds = buf
@@ -831,10 +831,19 @@ function flushDebugSession(s: PluginState, buf: Observation[], editedFiles: stri
         }
     }
 
+    // Add file context — helps understand what area the bug is in
+    for (const filePath of editedFiles.slice(0, 2)) {
+        try {
+            const fileContent = fs.readFileSync(filePath, "utf-8");
+            const analysis = analyzeFileContent(filePath, fileContent);
+            if (analysis.summary) sections.push("", "### Context", analysis.summary);
+        } catch { /* file may not exist */ }
+    }
+
     sections.push("", "### Prevention");
     sections.push("Watch for this pattern in future sessions.");
 
-    const guide = sections.join("\n").substring(0, 2000);
+    const guide = sections.join("\n").substring(0, 3000);
     const tags = [...new Set([...inferTags(buf, editedFiles), "gotcha", "debugging"])].slice(0, 8);
 
     const saved = saveMemoryWithSyncDedup(s, {
@@ -889,6 +898,28 @@ function flushEnhanceSession(s: PluginState, buf: Observation[], editedFiles: st
         if (/fetch\s*\(|axios|XMLHttpRequest/i.test(newStr) && !/fetch\s*\(|axios|XMLHttpRequest/i.test(oldStr)) {
             capabilities.push("external API integration");
         }
+        if (/canvas|getContext\s*\(\s*['"]2d/i.test(newStr) && !/canvas|getContext/i.test(oldStr)) {
+            capabilities.push("canvas rendering");
+        }
+        if (/AudioContext|new\s+Audio/i.test(newStr) && !/AudioContext|new\s+Audio/i.test(oldStr)) {
+            capabilities.push("audio playback");
+        }
+        if (/WebSocket|socket\.io/i.test(newStr) && !/WebSocket|socket\.io/i.test(oldStr)) {
+            capabilities.push("real-time communication (WebSocket)");
+        }
+        if (/IntersectionObserver|MutationObserver/i.test(newStr)) {
+            capabilities.push("DOM observation (IntersectionObserver/MutationObserver)");
+        }
+        if (/drag|draggable|ondrop/i.test(newStr) && !/drag/i.test(oldStr)) {
+            capabilities.push("drag-and-drop interaction");
+        }
+        // New CSS patterns
+        if (/@media/i.test(newStr) && !/@media/i.test(oldStr)) {
+            capabilities.push("responsive breakpoints");
+        }
+        if (/--[\w-]+:/i.test(newStr) && !/--[\w-]+:/i.test(oldStr)) {
+            capabilities.push("CSS custom properties (theming)");
+        }
     }
 
     const title = projectName
@@ -912,7 +943,7 @@ function flushEnhanceSession(s: PluginState, buf: Observation[], editedFiles: st
     }
 
     // Add understanding of current system state from file analysis
-    for (const filePath of editedFiles.slice(0, 2)) {
+    for (const filePath of editedFiles.slice(0, 3)) {
         try {
             const content = fs.readFileSync(filePath, "utf-8");
             const analysis = analyzeFileContent(filePath, content);
@@ -920,7 +951,7 @@ function flushEnhanceSession(s: PluginState, buf: Observation[], editedFiles: st
         } catch { /* file may not exist */ }
     }
 
-    const guide = sections.join("\n").substring(0, 2000);
+    const guide = sections.join("\n").substring(0, 3000);
     const tags = [...new Set([...inferTags(buf, editedFiles), "enhancement"])].slice(0, 8);
 
     const saved = saveMemoryWithSyncDedup(s, {
@@ -992,7 +1023,24 @@ function flushBuildSession(s: PluginState, buf: Observation[], editedFiles: stri
         }
     }
 
-    const guide = sections.join("\n").substring(0, 2000);
+    // Extract key edit patterns — what development approach was used
+    const editObs = buf.filter((o) => o.tool === "edit" || o.tool.toLowerCase().includes("edit"));
+    if (editObs.length >= 3) {
+        sections.push("", `### Development approach`);
+        sections.push(`${editObs.length} edits across ${fileNames.length} file(s)`);
+        // Check if iterative (many small edits) vs batch (few large edits)
+        const avgEditSize = editObs.reduce((sum, o) => {
+            const newStr = (o.args?.new_string || o.args?.newString || "") as string;
+            return sum + newStr.length;
+        }, 0) / editObs.length;
+        if (avgEditSize < 100 && editObs.length >= 5) {
+            sections.push("Pattern: iterative refinement (many small targeted edits)");
+        } else if (avgEditSize > 500) {
+            sections.push("Pattern: batch implementation (large code blocks)");
+        }
+    }
+
+    const guide = sections.join("\n").substring(0, 3000);
     const tags = [...new Set([...inferTags(buf, editedFiles), ...allTags])].slice(0, 8);
 
     const saved = saveMemoryWithSyncDedup(s, {
@@ -1044,10 +1092,13 @@ function analyzeFileContent(filePath: string, content: string): { summary: strin
     const fileName = filePath.split("/").pop() || filePath;
 
     if (ext === "html") return analyzeHTML(fileName, content);
-    if (ext === "css") return analyzeCSS(fileName, content);
-    if (ext === "js" || ext === "ts") return analyzeJS(fileName, content);
+    if (ext === "css" || ext === "scss" || ext === "less") return analyzeCSS(fileName, content);
+    if (ext === "js" || ext === "ts" || ext === "jsx" || ext === "tsx" || ext === "mjs") return analyzeJS(fileName, content);
     if (ext === "json") return analyzeJSON(fileName, content);
+    if (ext === "py") return analyzePython(fileName, content);
     if (ext === "md") return analyzeMD(fileName, content);
+    if (ext === "yaml" || ext === "yml" || ext === "toml") return analyzeConfig(fileName, content);
+    if (ext === "sql") return analyzeSQL(fileName, content);
 
     return { summary: "", tags: [] };
 }
@@ -1068,6 +1119,39 @@ function analyzeHTML(fileName: string, content: string): { summary: string; tags
     if (hasInlineCSS && hasInlineJS && externalCSS.length === 0 && externalJS.length === 0) {
         lines.push("Architecture: Single-file app (all CSS + JS embedded in HTML)");
         tags.push("single-file-app");
+    } else if (externalCSS.length > 0 || externalJS.length > 0) {
+        const externals = [...externalCSS, ...externalJS].map((e) => e.match(/["']([^"']+)["']/)?.[1] || "").filter(Boolean);
+        if (externals.length > 0) lines.push(`External assets: ${externals.join(", ")}`);
+    }
+
+    // Color theme / visual style — extract CSS variables, key colors, gradients
+    const cssVars = content.match(/--[\w-]+:\s*[^;]+/g) || [];
+    if (cssVars.length > 0) {
+        const colorVars = cssVars.filter((v) => /color|bg|background|accent|primary|secondary|border|shadow|theme/i.test(v.split(":")[0]));
+        if (colorVars.length > 0) {
+            const palette = colorVars.slice(0, 6).map((v) => v.trim()).join("; ");
+            lines.push(`Color theme: CSS variables (${palette})`);
+            tags.push("css-variables");
+        } else {
+            const allVars = cssVars.slice(0, 5).map((v) => v.split(":")[0].trim());
+            lines.push(`CSS custom properties: ${allVars.join(", ")}`);
+        }
+    }
+
+    // Gradients — visual style signature
+    const gradients = content.match(/(?:linear|radial|conic)-gradient\([^)]+\)/gi) || [];
+    if (gradients.length > 0) {
+        lines.push(`Gradients: ${gradients.length} gradient(s) used (${gradients[0].substring(0, 80)})`);
+    }
+
+    // Typography — font choices affect style identity
+    const fontFamilies = content.match(/font-family:\s*([^;}{]+)/gi) || [];
+    const googleFonts = content.match(/fonts\.googleapis\.com\/css2?\?family=([^"&]+)/i);
+    if (googleFonts) {
+        lines.push(`Typography: Google Fonts (${decodeURIComponent(googleFonts[1]).replace(/\+/g, " ")})`);
+    } else if (fontFamilies.length > 0) {
+        const fonts = [...new Set(fontFamilies.map((f) => f.replace(/font-family:\s*/i, "").trim()))];
+        lines.push(`Typography: ${fonts.slice(0, 3).join(", ")}`);
     }
 
     // Core data structures — look for state initialization patterns
@@ -1098,7 +1182,9 @@ function analyzeHTML(fileName: string, content: string): { summary: string; tags
     // Movement / physics model
     if (/velocity|speed|acceleration|dx|dy/i.test(content)) {
         const gravity = /gravity|gravit/i.test(content);
-        lines.push(`Physics: velocity-based movement${gravity ? " with gravity" : ""}`);
+        const friction = /friction|drag|damping/i.test(content);
+        const extras = [gravity ? "gravity" : "", friction ? "friction" : ""].filter(Boolean);
+        lines.push(`Physics: velocity-based movement${extras.length > 0 ? ` with ${extras.join(" & ")}` : ""}`);
         tags.push("physics");
     }
 
@@ -1120,7 +1206,17 @@ function analyzeHTML(fileName: string, content: string): { summary: string; tags
     if (mouseHandler) controls.push("mouse/touch");
     if (/ArrowLeft|ArrowRight|ArrowUp|ArrowDown/i.test(content)) controls.push("arrow keys");
     if (/['"](w|a|s|d)['"]/i.test(content) && /key/i.test(content)) controls.push("WASD");
+    if (/touchstart|touchmove|touchend/i.test(content) && !mouseHandler) controls.push("touch gestures");
+    if (/swipe|gesture/i.test(content)) controls.push("swipe gestures");
     if (controls.length > 0) lines.push(`Controls: ${controls.join(", ")}`);
+
+    // Scoring / UI state
+    const scorePattern = /(?:let|const|var)\s+(?:score|points|level|lives|health)\b/gi;
+    const scoreVars = content.match(scorePattern) || [];
+    if (scoreVars.length > 0) {
+        const varNames = scoreVars.map((s) => s.replace(/(?:let|const|var)\s+/i, "").trim());
+        lines.push(`Game state: ${varNames.join(", ")}`);
+    }
 
     // Canvas usage — dimensions matter for understanding coordinate system
     const canvas = content.match(/<canvas[^>]*(?:width="(\d+)")[^>]*(?:height="(\d+)")?/i);
@@ -1138,19 +1234,46 @@ function analyzeHTML(fileName: string, content: string): { summary: string; tags
         lines.push(`Persistence: localStorage${keyNames.length > 0 ? ` (keys: ${keyNames.join(", ")})` : ""}`);
     }
 
-    // Rendering approach — DOM vs canvas
+    // Rendering approach — DOM vs canvas, plus specifics
     if (/<canvas/i.test(content) && /\.getContext|ctx\./i.test(content)) {
-        lines.push("Rendering: canvas 2D context (direct draw calls)");
+        const drawCalls = [];
+        if (/fillRect|strokeRect/i.test(content)) drawCalls.push("rects");
+        if (/arc\s*\(|beginPath/i.test(content)) drawCalls.push("paths/arcs");
+        if (/drawImage/i.test(content)) drawCalls.push("sprites");
+        if (/fillText|strokeText/i.test(content)) drawCalls.push("text");
+        lines.push(`Rendering: canvas 2D context${drawCalls.length > 0 ? ` (${drawCalls.join(", ")})` : ""}`);
     } else if (/innerHTML|appendChild|createElement|\.textContent/i.test(content)) {
         lines.push("Rendering: DOM manipulation");
         tags.push("dom-rendering");
+    }
+
+    // Responsive / mobile meta
+    if (/viewport/i.test(content) && /width=device-width/i.test(content)) {
+        lines.push("Responsive: viewport meta tag set");
+    }
+
+    // Audio
+    if (/new\s+Audio|\.play\s*\(|AudioContext|createOscillator/i.test(content)) {
+        const webAudio = /AudioContext|createOscillator/i.test(content);
+        lines.push(`Audio: ${webAudio ? "Web Audio API (procedural)" : "HTML5 Audio elements"}`);
+        tags.push("audio");
+    }
+
+    // Key algorithms — look for sort, search, pathfinding, recursion patterns
+    if (/\.sort\s*\(/i.test(content)) {
+        const customSort = content.match(/\.sort\s*\(\s*\(([^)]+)\)\s*=>/);
+        if (customSort) lines.push(`Sorting: custom comparator (${customSort[1].trim()})`);
+    }
+    if (/Math\.random/i.test(content)) {
+        const randomUsage = /shuffle|randomize|spawn|generate|place/i.test(content);
+        if (randomUsage) lines.push("Randomization: used for spawning/generation");
     }
 
     if (lines.length === 0) return { summary: "", tags: [] };
 
     return {
         summary: `### ${fileName}\n${lines.join("\n")}`,
-        tags: tags.slice(0, 5),
+        tags: tags.slice(0, 7),
     };
 }
 
@@ -1169,10 +1292,78 @@ function analyzeCSS(fileName: string, content: string): { summary: string; tags:
         const template = content.match(/grid-template-columns:\s*([^;]+)/i);
         if (template) lines.push(`Layout: CSS Grid (${template[1].trim().substring(0, 60)})`);
         else lines.push("Layout: CSS Grid");
+        const gap = content.match(/(?:grid-)?gap:\s*([^;]+)/i);
+        if (gap) lines.push(`Grid gap: ${gap[1].trim()}`);
         tags.push("css-grid");
     } else if (hasFlex) {
-        lines.push("Layout: Flexbox");
+        const flexDir = content.match(/flex-direction:\s*(\w+)/i);
+        lines.push(`Layout: Flexbox${flexDir ? ` (${flexDir[1]})` : ""}`);
         tags.push("flexbox");
+    }
+
+    // Color palette — extract meaningful color definitions
+    const colorProps = content.match(/(?:color|background(?:-color)?|border(?:-color)?|fill|stroke):\s*([^;}{]+)/gi) || [];
+    const uniqueColors = new Set<string>();
+    for (const prop of colorProps) {
+        const val = prop.split(":")[1]?.trim();
+        if (val && !/inherit|initial|currentColor|transparent|none/i.test(val)) {
+            uniqueColors.add(val.substring(0, 40));
+        }
+    }
+    if (uniqueColors.size >= 3) {
+        const palette = [...uniqueColors].slice(0, 6).join(", ");
+        lines.push(`Color palette: ${palette}`);
+    }
+
+    // Gradients
+    const gradients = content.match(/(?:linear|radial|conic)-gradient\([^)]+\)/gi) || [];
+    if (gradients.length > 0) {
+        lines.push(`Gradients: ${gradients[0].substring(0, 80)}`);
+    }
+
+    // Theming approach — CSS variables indicate a theming system
+    const vars = content.match(/--[\w-]+:\s*[^;]+/g) || [];
+    if (vars.length >= 3) {
+        const varEntries = vars.slice(0, 6).map((v) => v.trim());
+        lines.push(`CSS custom properties: ${varEntries.join("; ")}`);
+        tags.push("css-variables");
+    }
+
+    // Typography — fonts, sizes, weights
+    const fontFamilies = content.match(/font-family:\s*([^;}{]+)/gi) || [];
+    if (fontFamilies.length > 0) {
+        const fonts = [...new Set(fontFamilies.map((f) => f.replace(/font-family:\s*/i, "").trim()))];
+        lines.push(`Typography: ${fonts.slice(0, 3).join(", ")}`);
+    }
+    const fontSizes = content.match(/font-size:\s*([^;}{]+)/gi) || [];
+    if (fontSizes.length >= 3) {
+        const sizes = [...new Set(fontSizes.map((f) => f.replace(/font-size:\s*/i, "").trim()))];
+        lines.push(`Font scale: ${sizes.slice(0, 5).join(", ")}`);
+    }
+
+    // Spacing system — detect rem/em/px consistency
+    const spacings = content.match(/(?:margin|padding|gap)(?:-\w+)?:\s*([^;}{]+)/gi) || [];
+    if (spacings.length >= 3) {
+        const units = spacings.map((s) => s.split(":")[1]?.trim() || "");
+        const usesRem = units.some((u) => /rem/i.test(u));
+        const usesPx = units.some((u) => /px/i.test(u));
+        const usesEm = units.some((u) => /\dem\b/i.test(u));
+        const system = usesRem ? "rem-based" : usesEm ? "em-based" : usesPx ? "px-based" : "mixed";
+        lines.push(`Spacing: ${system} units`);
+    }
+
+    // Naming methodology — detect BEM, utility classes, etc.
+    const selectors = content.match(/[.#][\w-]+/g) || [];
+    if (selectors.length >= 5) {
+        const bemPattern = selectors.filter((s) => /__.+--|--\w/.test(s));
+        const utilPattern = selectors.filter((s) => /^\.(?:flex|grid|text-|bg-|p-|m-|w-|h-|rounded|shadow)/i.test(s));
+        if (bemPattern.length >= 3) {
+            lines.push("Naming: BEM methodology (block__element--modifier)");
+            tags.push("bem");
+        } else if (utilPattern.length >= 3) {
+            lines.push("Naming: Utility-first classes");
+            tags.push("utility-css");
+        }
     }
 
     // Animation approach — what animates and how
@@ -1183,22 +1374,46 @@ function analyzeCSS(fileName: string, content: string): { summary: string; tags:
         tags.push("css-animations");
     }
     const transitions = content.match(/transition:\s*([^;]+)/gi) || [];
-    if (transitions.length > 0 && keyframes.length === 0) {
-        lines.push("Animations: CSS transitions");
+    if (transitions.length > 0) {
+        const props = [...new Set(transitions.map((t) => t.replace(/transition:\s*/i, "").trim().substring(0, 40)))];
+        if (keyframes.length === 0) {
+            lines.push(`Transitions: ${props.slice(0, 3).join(", ")}`);
+        }
     }
 
-    // Theming approach — CSS variables indicate a theming system
-    const vars = content.match(/--[\w-]+:/g) || [];
-    if (vars.length >= 3) {
-        const varNames = vars.slice(0, 5).map((v) => v.replace(":", ""));
-        lines.push(`Theming: CSS custom properties (${varNames.join(", ")})`);
-        tags.push("css-variables");
+    // Transforms
+    const transforms = content.match(/transform:\s*([^;]+)/gi) || [];
+    if (transforms.length >= 2) {
+        const types = [...new Set(transforms.map((t) => {
+            const val = t.replace(/transform:\s*/i, "").trim();
+            return val.match(/\w+(?=\()/)?.[0] || val.substring(0, 20);
+        }))];
+        lines.push(`Transforms: ${types.slice(0, 4).join(", ")}`);
     }
 
-    // Responsive design
+    // Box shadows / visual depth
+    const shadows = content.match(/box-shadow:\s*([^;]+)/gi) || [];
+    if (shadows.length >= 2) {
+        lines.push(`Shadows: ${shadows.length} box-shadow rules (depth/elevation system)`);
+    }
+
+    // Responsive design — extract actual breakpoints
     const mediaQueries = content.match(/@media[^{]+/g) || [];
     if (mediaQueries.length > 0) {
-        lines.push(`Responsive: ${mediaQueries.length} breakpoint(s)`);
+        const breakpoints = mediaQueries
+            .map((m) => m.match(/(\d+)\s*px/)?.[1])
+            .filter(Boolean);
+        if (breakpoints.length > 0) {
+            lines.push(`Responsive: breakpoints at ${[...new Set(breakpoints)].join(", ")}px`);
+        } else {
+            lines.push(`Responsive: ${mediaQueries.length} media query/queries`);
+        }
+    }
+
+    // Pseudo-elements (decorative patterns)
+    const pseudos = content.match(/::(?:before|after)/g) || [];
+    if (pseudos.length >= 2) {
+        lines.push(`Decorative: ${pseudos.length} pseudo-element(s) for visual effects`);
     }
 
     if (lines.length === 0) return { summary: "", tags: [] };
@@ -1213,74 +1428,447 @@ function analyzeJS(fileName: string, content: string): { summary: string; tags: 
     // Architecture pattern — classes vs functional, modules vs scripts
     const classes = content.match(/class\s+(\w+)/g) || [];
     const imports = content.match(/import\s+.+from\s+['"]([^'"]+)['"]/g) || [];
+
     if (classes.length > 0) {
         const names = classes.map((c) => c.replace("class ", ""));
-        lines.push(`Architecture: class-based (${names.join(", ")})`);
+        // Check for inheritance
+        const extensions = content.match(/class\s+\w+\s+extends\s+(\w+)/g) || [];
+        if (extensions.length > 0) {
+            const parents = extensions.map((e) => e.match(/extends\s+(\w+)/)?.[1] || "");
+            lines.push(`Architecture: class-based (${names.join(", ")}) extends ${parents.join(", ")}`);
+        } else {
+            lines.push(`Architecture: class-based (${names.join(", ")})`);
+        }
         tags.push("class-based");
+    } else {
+        // Check for functional patterns
+        const arrowFns = (content.match(/(?:const|let)\s+\w+\s*=\s*(?:\([^)]*\)|[\w]+)\s*=>/g) || []).length;
+        const regularFns = (content.match(/function\s+\w+/g) || []).length;
+        if (arrowFns > regularFns && arrowFns >= 3) {
+            lines.push("Architecture: functional (arrow functions)");
+            tags.push("functional");
+        } else if (regularFns >= 3) {
+            lines.push("Architecture: procedural (named functions)");
+        }
     }
+
+    // Module structure
     if (imports.length > 0) {
         const externals = imports
             .map((i) => i.match(/from\s+['"]([^'"]+)['"]/)?.[1] || "")
             .filter((m) => m && !m.startsWith("."));
+        const internals = imports
+            .map((i) => i.match(/from\s+['"]([^'"]+)['"]/)?.[1] || "")
+            .filter((m) => m && m.startsWith("."));
         if (externals.length > 0) lines.push(`Dependencies: ${externals.join(", ")}`);
+        if (internals.length >= 2) lines.push(`Internal modules: ${internals.length} local imports`);
+    }
+    const exports = content.match(/export\s+(?:default\s+)?(?:function|class|const|let|{)/g) || [];
+    if (exports.length > 0) {
+        tags.push("modular");
+    }
+
+    // React component patterns
+    const jsxReturn = /return\s*\(\s*</i.test(content) || /return\s+</i.test(content);
+    if (jsxReturn) {
+        tags.push("react-component");
+        const useEffect = (content.match(/useEffect/g) || []).length;
+        const useMemo = (content.match(/useMemo/g) || []).length;
+        const useCallback = (content.match(/useCallback/g) || []).length;
+        const useRef = (content.match(/useRef/g) || []).length;
+        const hooks = [];
+        if (useEffect > 0) hooks.push(`useEffect(${useEffect})`);
+        if (useMemo > 0) hooks.push(`useMemo(${useMemo})`);
+        if (useCallback > 0) hooks.push(`useCallback(${useCallback})`);
+        if (useRef > 0) hooks.push(`useRef(${useRef})`);
+        if (hooks.length > 0) lines.push(`React hooks: ${hooks.join(", ")}`);
+    }
+
+    // Custom hooks
+    const customHooks = content.match(/(?:export\s+)?function\s+use[A-Z]\w+/g) || [];
+    if (customHooks.length > 0) {
+        const names = customHooks.map((h) => h.match(/use[A-Z]\w+/)?.[0] || "");
+        lines.push(`Custom hooks: ${names.join(", ")}`);
+        tags.push("custom-hooks");
     }
 
     // State management pattern
     if (/createContext|useContext/i.test(content)) {
-        lines.push("State: React Context");
+        const contextNames = content.match(/create(?:Context|context)\s*[<(]/g) || [];
+        lines.push(`State: React Context${contextNames.length > 1 ? ` (${contextNames.length} contexts)` : ""}`);
         tags.push("react-context");
     } else if (/useReducer|dispatch/i.test(content)) {
-        lines.push("State: reducer pattern (dispatch/action)");
+        // Try to extract action types
+        const actionTypes = content.match(/['"](\w+)['"]\s*:/g) || [];
+        const typeNames = actionTypes.slice(0, 4).map((a) => a.replace(/['":\s]/g, ""));
+        lines.push(`State: reducer pattern${typeNames.length > 0 ? ` (actions: ${typeNames.join(", ")})` : ""}`);
         tags.push("reducer-pattern");
     } else if (/useState/i.test(content)) {
-        lines.push("State: React useState hooks");
+        const stateVars = content.match(/const\s+\[(\w+),\s*set\w+\]\s*=\s*useState/g) || [];
+        const names = stateVars.map((s) => s.match(/\[(\w+)/)?.[1] || "").filter(Boolean);
+        lines.push(`State: React useState${names.length > 0 ? ` (${names.join(", ")})` : ""}`);
         tags.push("react-hooks");
     } else if (/createStore|configureStore/i.test(content)) {
         lines.push("State: Redux store");
         tags.push("redux");
+    } else if (/createSignal|createStore|createEffect/i.test(content)) {
+        lines.push("State: SolidJS signals");
+        tags.push("solid-js");
+    } else if (/writable|readable|derived/i.test(content) && /\$:/i.test(content)) {
+        lines.push("State: Svelte stores");
+        tags.push("svelte");
+    }
+
+    // Async patterns
+    const asyncFns = (content.match(/async\s+(?:function|\w+\s*=)/g) || []).length;
+    const awaits = (content.match(/await\s+/g) || []).length;
+    const promises = (content.match(/new\s+Promise|\.then\s*\(/g) || []).length;
+    if (asyncFns >= 2 || awaits >= 3) {
+        lines.push(`Async: ${asyncFns} async function(s), ${awaits} await(s)`);
+        tags.push("async-await");
+    } else if (promises >= 2) {
+        lines.push(`Async: Promise chain pattern (${promises} .then calls)`);
+        tags.push("promise-chains");
     }
 
     // Data flow pattern
     if (/fetch\s*\(|axios|XMLHttpRequest/i.test(content)) {
-        lines.push("Data: fetches from external API");
+        const endpoints = content.match(/(?:fetch|get|post|put|delete|patch)\s*\(\s*[`'"](\/[^`'"]+|https?:\/\/[^`'"]+)/gi) || [];
+        if (endpoints.length > 0) {
+            const paths = endpoints.slice(0, 3).map((e) => e.match(/[`'"](\/[^`'"]+|https?:\/\/[^`'"]+)/)?.[1] || "").filter(Boolean);
+            lines.push(`API: ${paths.join(", ")}`);
+        } else {
+            lines.push("Data: fetches from external API");
+        }
         tags.push("api-client");
     }
-    if (/export\s+(default\s+)?function|module\.exports/i.test(content)) {
-        tags.push("modular");
+
+    // Event patterns
+    const eventEmitters = /\.emit\s*\(|\.on\s*\(.*,\s*(?:function|\()/i.test(content);
+    const customEvents = /new\s+CustomEvent|dispatchEvent/i.test(content);
+    if (eventEmitters) {
+        lines.push("Events: event emitter pattern (pub/sub)");
+        tags.push("event-driven");
+    } else if (customEvents) {
+        lines.push("Events: CustomEvent dispatch pattern");
+        tags.push("event-driven");
+    }
+
+    // TypeScript specifics
+    const interfaces = content.match(/interface\s+(\w+)/g) || [];
+    const typeAliases = content.match(/type\s+(\w+)\s*=/g) || [];
+    const generics = (content.match(/<\w+(?:\s*extends\s*\w+)?>/g) || []).length;
+    if (interfaces.length > 0 || typeAliases.length > 0) {
+        const names = [
+            ...interfaces.map((i) => i.replace("interface ", "")),
+            ...typeAliases.map((t) => t.replace(/type\s+/, "").replace(/\s*=/, "")),
+        ];
+        lines.push(`Types: ${names.slice(0, 5).join(", ")}${generics >= 2 ? ` (${generics} generic types)` : ""}`);
+        tags.push("typescript");
+    }
+
+    // Enums / constants pattern
+    const enums = content.match(/enum\s+(\w+)/g) || [];
+    const constObjects = content.match(/const\s+(\w+)\s*=\s*\{[^}]+\}\s*as\s+const/g) || [];
+    if (enums.length > 0) {
+        const names = enums.map((e) => e.replace("enum ", ""));
+        lines.push(`Enums: ${names.join(", ")}`);
+    } else if (constObjects.length > 0) {
+        lines.push(`Constants: ${constObjects.length} const assertion object(s)`);
+    }
+
+    // Key data structures
+    const maps = (content.match(/new\s+Map/g) || []).length;
+    const sets = (content.match(/new\s+Set/g) || []).length;
+    const weakMaps = (content.match(/new\s+WeakMap/g) || []).length;
+    if (maps + sets + weakMaps >= 2) {
+        const structs = [];
+        if (maps > 0) structs.push(`Map(${maps})`);
+        if (sets > 0) structs.push(`Set(${sets})`);
+        if (weakMaps > 0) structs.push(`WeakMap(${weakMaps})`);
+        lines.push(`Data structures: ${structs.join(", ")}`);
     }
 
     // Error handling approach
     const tryCatch = (content.match(/try\s*\{/g) || []).length;
     if (tryCatch >= 2) {
-        lines.push(`Error handling: ${tryCatch} try/catch blocks`);
+        const customErrors = content.match(/class\s+\w+\s+extends\s+Error/g) || [];
+        if (customErrors.length > 0) {
+            lines.push(`Error handling: ${tryCatch} try/catch + custom error class(es)`);
+        } else {
+            lines.push(`Error handling: ${tryCatch} try/catch blocks`);
+        }
+    }
+
+    // Testing patterns
+    if (/describe\s*\(|it\s*\(|test\s*\(|expect\s*\(/i.test(content)) {
+        const describes = (content.match(/describe\s*\(/g) || []).length;
+        const tests = (content.match(/(?:it|test)\s*\(/g) || []).length;
+        lines.push(`Tests: ${tests} test case(s)${describes > 0 ? ` in ${describes} suite(s)` : ""}`);
+        tags.push("testing");
+    }
+
+    // Naming conventions — detect camelCase vs snake_case vs kebab-case
+    const fnNames = content.match(/(?:function|const|let)\s+([a-z]\w+)/g) || [];
+    if (fnNames.length >= 5) {
+        const names = fnNames.map((n) => n.match(/\s+(\w+)$/)?.[1] || "");
+        const camel = names.filter((n) => /[a-z][A-Z]/.test(n)).length;
+        const snake = names.filter((n) => /_/.test(n) && !/[A-Z]/.test(n)).length;
+        if (camel > snake && camel >= 3) lines.push("Naming: camelCase convention");
+        else if (snake > camel && snake >= 3) lines.push("Naming: snake_case convention");
     }
 
     if (lines.length === 0) return { summary: "", tags: [] };
 
-    return { summary: `### ${fileName}\n${lines.join("\n")}`, tags };
+    return { summary: `### ${fileName}\n${lines.join("\n")}`, tags: tags.slice(0, 7) };
 }
 
 function analyzeJSON(fileName: string, content: string): { summary: string; tags: string[] } {
     try {
         const obj = JSON.parse(content);
         const lines: string[] = [];
+        const tags: string[] = ["config"];
 
-        // Only record what's useful for understanding the project
-        if (obj.name) lines.push(`Project: ${obj.name}`);
-        if (obj.dependencies) {
-            const deps = Object.keys(obj.dependencies);
-            lines.push(`Stack: ${deps.join(", ")}`);
-        }
-        if (obj.scripts) {
-            const scriptNames = Object.keys(obj.scripts);
-            lines.push(`Available scripts: ${scriptNames.join(", ")}`);
+        if (fileName === "package.json" || obj.dependencies || obj.devDependencies) {
+            // package.json — extract full development context
+            if (obj.name) lines.push(`Project: ${obj.name}${obj.version ? ` v${obj.version}` : ""}`);
+            if (obj.description) lines.push(`Purpose: ${obj.description.substring(0, 100)}`);
+            if (obj.dependencies) {
+                const deps = Object.keys(obj.dependencies);
+                // Categorize: UI frameworks, state, utils, etc.
+                const frameworks = deps.filter((d) => /react|vue|svelte|angular|next|nuxt|solid|preact/i.test(d));
+                const others = deps.filter((d) => !frameworks.includes(d));
+                if (frameworks.length > 0) {
+                    lines.push(`Framework: ${frameworks.join(", ")}`);
+                    tags.push(...frameworks.map((f) => f.replace(/@.*/, "")));
+                }
+                if (others.length > 0) lines.push(`Dependencies: ${others.join(", ")}`);
+            }
+            if (obj.devDependencies) {
+                const devDeps = Object.keys(obj.devDependencies);
+                const testTools = devDeps.filter((d) => /jest|vitest|mocha|cypress|playwright|testing/i.test(d));
+                const buildTools = devDeps.filter((d) => /webpack|vite|esbuild|rollup|parcel|turbopack/i.test(d));
+                const linters = devDeps.filter((d) => /eslint|prettier|biome|stylelint/i.test(d));
+                const typeTools = devDeps.filter((d) => /typescript|@types/i.test(d));
+                if (testTools.length > 0) {
+                    lines.push(`Testing: ${testTools.join(", ")}`);
+                    tags.push("testing");
+                }
+                if (buildTools.length > 0) {
+                    lines.push(`Build: ${buildTools.join(", ")}`);
+                    tags.push("bundler");
+                }
+                if (linters.length > 0) lines.push(`Linting: ${linters.join(", ")}`);
+                if (typeTools.length > 0) {
+                    lines.push(`TypeScript: ${typeTools.filter((d) => d !== "typescript").join(", ") || "enabled"}`);
+                    tags.push("typescript");
+                }
+            }
+            if (obj.scripts) {
+                const scripts = Object.entries(obj.scripts as Record<string, string>);
+                const scriptDetails = scripts.slice(0, 6).map(([k, v]) => `${k}: ${String(v).substring(0, 50)}`);
+                lines.push(`Scripts: ${scriptDetails.join(", ")}`);
+            }
+            if (obj.type === "module") lines.push("Module system: ESM (type: module)");
+            if (obj.engines) {
+                const engines = Object.entries(obj.engines).map(([k, v]) => `${k} ${v}`);
+                lines.push(`Engines: ${engines.join(", ")}`);
+            }
+        } else if (fileName === "tsconfig.json" || obj.compilerOptions) {
+            // TypeScript config
+            lines.push("TypeScript configuration");
+            const co = obj.compilerOptions || {};
+            if (co.target) lines.push(`Target: ${co.target}`);
+            if (co.module) lines.push(`Module: ${co.module}`);
+            if (co.jsx) lines.push(`JSX: ${co.jsx}`);
+            if (co.strict !== undefined) lines.push(`Strict mode: ${co.strict}`);
+            if (co.paths) {
+                const aliases = Object.keys(co.paths);
+                lines.push(`Path aliases: ${aliases.join(", ")}`);
+            }
+            tags.push("typescript");
+        } else {
+            // Generic JSON — record structure
+            if (obj.name) lines.push(`Project: ${obj.name}`);
+            const topKeys = Object.keys(obj).slice(0, 8);
+            if (topKeys.length > 0) lines.push(`Structure: ${topKeys.join(", ")}`);
         }
 
         if (lines.length === 0) return { summary: "", tags: [] };
-        return { summary: `### ${fileName}\n${lines.join("\n")}`, tags: ["config"] };
+        return { summary: `### ${fileName}\n${lines.join("\n")}`, tags: tags.slice(0, 7) };
     } catch {
         return { summary: "", tags: [] };
     }
+}
+
+function analyzePython(fileName: string, content: string): { summary: string; tags: string[] } {
+    const lines: string[] = [];
+    const tags: string[] = [];
+
+    // Classes and inheritance
+    const classes = content.match(/class\s+(\w+)(?:\(([^)]+)\))?:/g) || [];
+    if (classes.length > 0) {
+        const classInfo = classes.map((c) => {
+            const match = c.match(/class\s+(\w+)(?:\(([^)]+)\))?/);
+            if (match && match[2]) return `${match[1]}(${match[2]})`;
+            return match?.[1] || "";
+        });
+        lines.push(`Classes: ${classInfo.join(", ")}`);
+        tags.push("class-based");
+    }
+
+    // Imports — what frameworks/libraries are used
+    const importLines = content.match(/(?:from\s+(\S+)\s+import|import\s+(\S+))/g) || [];
+    if (importLines.length > 0) {
+        const modules = [...new Set(importLines.map((i) => {
+            const fromMatch = i.match(/from\s+(\S+)/);
+            const importMatch = i.match(/import\s+(\S+)/);
+            return (fromMatch?.[1] || importMatch?.[1] || "").replace(/['"]/g, "");
+        }))].filter(Boolean);
+        const externals = modules.filter((m) => !m.startsWith("."));
+        if (externals.length > 0) lines.push(`Dependencies: ${externals.join(", ")}`);
+    }
+
+    // Framework detection
+    if (/from\s+flask|import\s+flask/i.test(content)) { tags.push("flask"); lines.push("Framework: Flask"); }
+    else if (/from\s+django|import\s+django/i.test(content)) { tags.push("django"); lines.push("Framework: Django"); }
+    else if (/from\s+fastapi|import\s+fastapi/i.test(content)) { tags.push("fastapi"); lines.push("Framework: FastAPI"); }
+    else if (/from\s+starlette/i.test(content)) { tags.push("starlette"); }
+
+    // Decorators — indicate patterns (routes, properties, etc.)
+    const decorators = content.match(/@\w[\w.]*(?:\([^)]*\))?/g) || [];
+    if (decorators.length > 0) {
+        const uniqueDecos = [...new Set(decorators.slice(0, 5).map((d) => d.substring(0, 40)))];
+        lines.push(`Decorators: ${uniqueDecos.join(", ")}`);
+    }
+
+    // Route definitions (web frameworks)
+    const routes = content.match(/@(?:app|router)\.(?:get|post|put|delete|patch|route)\s*\(\s*['"]([^'"]+)['"]/g) || [];
+    if (routes.length > 0) {
+        const paths = routes.map((r) => r.match(/['"]([^'"]+)['"]/)?.[1] || "");
+        lines.push(`Endpoints: ${paths.join(", ")}`);
+        tags.push("api-routes");
+    }
+
+    // Async patterns
+    const asyncDefs = (content.match(/async\s+def\s+\w+/g) || []).length;
+    const awaitCalls = (content.match(/await\s+/g) || []).length;
+    if (asyncDefs >= 2) {
+        lines.push(`Async: ${asyncDefs} async def(s), ${awaitCalls} await(s)`);
+        tags.push("async-python");
+    }
+
+    // Type hints
+    const typeHints = (content.match(/:\s*(?:str|int|float|bool|list|dict|Optional|Union|Tuple|List|Dict|Any)/g) || []).length;
+    const returnTypes = (content.match(/->\s*\w+/g) || []).length;
+    if (typeHints >= 3 || returnTypes >= 2) {
+        lines.push(`Type hints: ${typeHints} parameter type(s), ${returnTypes} return type(s)`);
+        tags.push("typed-python");
+    }
+
+    // Data models (Pydantic, dataclass, etc.)
+    if (/class\s+\w+\(BaseModel\)/i.test(content)) {
+        lines.push("Data modeling: Pydantic BaseModel");
+        tags.push("pydantic");
+    } else if (/@dataclass/i.test(content)) {
+        lines.push("Data modeling: dataclasses");
+        tags.push("dataclass");
+    }
+
+    // Database patterns
+    if (/SQLAlchemy|session\.query|db\.session/i.test(content)) {
+        lines.push("Database: SQLAlchemy ORM");
+        tags.push("sqlalchemy");
+    } else if (/cursor\.|\.execute\s*\(/i.test(content)) {
+        lines.push("Database: raw SQL queries");
+        tags.push("database");
+    }
+
+    // Testing patterns
+    if (/def\s+test_\w+|class\s+Test\w+|pytest|unittest/i.test(content)) {
+        const testFns = (content.match(/def\s+test_\w+/g) || []).length;
+        lines.push(`Tests: ${testFns} test function(s)`);
+        tags.push("testing");
+    }
+
+    // Error handling
+    const excepts = (content.match(/except\s+/g) || []).length;
+    if (excepts >= 2) {
+        lines.push(`Error handling: ${excepts} except clause(s)`);
+    }
+
+    // Naming convention — Python uses snake_case by convention, note if violated
+    const fnNames = content.match(/def\s+([a-z]\w+)/g) || [];
+    if (fnNames.length >= 5) {
+        const names = fnNames.map((n) => n.replace("def ", ""));
+        const camel = names.filter((n) => /[a-z][A-Z]/.test(n)).length;
+        if (camel >= 3) lines.push("Naming: camelCase (non-standard for Python)");
+    }
+
+    if (lines.length === 0) return { summary: "", tags: [] };
+    return { summary: `### ${fileName}\n${lines.join("\n")}`, tags: tags.slice(0, 7) };
+}
+
+function analyzeConfig(fileName: string, content: string): { summary: string; tags: string[] } {
+    const lines: string[] = [];
+    const tags: string[] = ["config"];
+
+    // YAML/TOML — detect common config types
+    if (/docker-compose/i.test(fileName)) {
+        const services = content.match(/^\s{2}(\w[\w-]*):/gm) || [];
+        if (services.length > 0) {
+            const names = services.map((s) => s.trim().replace(":", ""));
+            lines.push(`Docker Compose: ${names.join(", ")}`);
+            tags.push("docker");
+        }
+    } else if (/github\/workflows|\.github/i.test(fileName) || /^on:/m.test(content)) {
+        const triggers = content.match(/on:\s*\[?([^\]}\n]+)/);
+        if (triggers) lines.push(`CI/CD trigger: ${triggers[1].trim()}`);
+        tags.push("ci-cd");
+    } else if (/pyproject/i.test(fileName)) {
+        const name = content.match(/name\s*=\s*["']([^"']+)/);
+        if (name) lines.push(`Python project: ${name[1]}`);
+        tags.push("python");
+    }
+
+    // Extract top-level keys for structure understanding
+    const topKeys = content.match(/^[a-zA-Z][\w-]*:/gm) || [];
+    if (topKeys.length > 0) {
+        const keys = topKeys.slice(0, 8).map((k) => k.replace(":", ""));
+        lines.push(`Structure: ${keys.join(", ")}`);
+    }
+
+    if (lines.length === 0) return { summary: "", tags: [] };
+    return { summary: `### ${fileName}\n${lines.join("\n")}`, tags };
+}
+
+function analyzeSQL(fileName: string, content: string): { summary: string; tags: string[] } {
+    const lines: string[] = [];
+    const tags: string[] = ["database"];
+
+    // Tables
+    const creates = content.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"']?(\w+)/gi) || [];
+    if (creates.length > 0) {
+        const tables = creates.map((c) => c.match(/TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"']?(\w+)/i)?.[1] || "");
+        lines.push(`Tables: ${tables.join(", ")}`);
+    }
+
+    // Indexes
+    const indexes = (content.match(/CREATE\s+(?:UNIQUE\s+)?INDEX/gi) || []).length;
+    if (indexes > 0) lines.push(`Indexes: ${indexes} index definition(s)`);
+
+    // Foreign keys / relationships
+    const fks = (content.match(/FOREIGN\s+KEY|REFERENCES/gi) || []).length;
+    if (fks > 0) lines.push(`Relations: ${fks} foreign key constraint(s)`);
+
+    // Migrations pattern
+    if (/ALTER\s+TABLE/i.test(content)) {
+        lines.push("Contains schema migrations (ALTER TABLE)");
+        tags.push("migrations");
+    }
+
+    if (lines.length === 0) return { summary: "", tags: [] };
+    return { summary: `### ${fileName}\n${lines.join("\n")}`, tags };
 }
 
 function analyzeMD(fileName: string, _content: string): { summary: string; tags: string[] } {
