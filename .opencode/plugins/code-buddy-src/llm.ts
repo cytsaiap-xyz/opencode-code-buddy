@@ -87,49 +87,7 @@ function readProviderFromOpenCodeJson(filePath: string, s: PluginState): Provide
 export async function resolveProvider(s: PluginState): Promise<ProviderInfo | null> {
     if (s.resolvedProvider) return s.resolvedProvider;
 
-    // Step 1: Try the OpenCode SDK client API
-    try {
-        const result = await s.client.config.providers();
-        if (result.data) {
-            const providers = result.data.providers || [];
-            if (providers.length > 0) {
-                let target: any = null;
-                if (s.config.llm.preferredProvider) {
-                    target = providers.find((p: any) => p.id === s.config.llm.preferredProvider);
-                }
-                if (!target) target = providers[0];
-
-                if (target) {
-                    const modelKeys = Object.keys(target.models || {});
-                    let modelID = "";
-                    if (s.config.llm.preferredModel && modelKeys.includes(s.config.llm.preferredModel)) {
-                        modelID = s.config.llm.preferredModel;
-                    } else if (modelKeys.length > 0) {
-                        modelID = modelKeys[0];
-                    }
-
-                    if (modelID) {
-                        const hdrs = target.options?.headers;
-                        s.resolvedProvider = {
-                            providerID: target.id,
-                            modelID,
-                            baseURL: String(target.options?.baseURL || target.options?.baseUrl || ""),
-                            apiKey: String(target.key || target.options?.apiKey || ""),
-                            name: target.name || target.id,
-                            headers: hdrs && typeof hdrs === "object" ? hdrs : undefined,
-                        };
-
-                        s.log(`[code-buddy] Resolved provider: ${s.resolvedProvider.name} (${s.resolvedProvider.modelID})`);
-                        return s.resolvedProvider;
-                    }
-                }
-            }
-        }
-    } catch (error) {
-        s.log("[code-buddy] SDK provider resolution failed, trying opencode.json:", error);
-    }
-
-    // Step 2: Try opencode.json in current working directory
+    // Step 1: Try opencode.json in current working directory
     const localConfig = path.join(process.cwd(), "opencode.json");
     const fromLocal = readProviderFromOpenCodeJson(localConfig, s);
     if (fromLocal) {
@@ -137,7 +95,7 @@ export async function resolveProvider(s: PluginState): Promise<ProviderInfo | nu
         return s.resolvedProvider;
     }
 
-    // Step 3: Try ~/.config/opencode/opencode.json
+    // Step 2: Try ~/.config/opencode/opencode.json
     const globalConfig = path.join(os.homedir(), ".config", "opencode", "opencode.json");
     const fromGlobal = readProviderFromOpenCodeJson(globalConfig, s);
     if (fromGlobal) {
@@ -145,7 +103,7 @@ export async function resolveProvider(s: PluginState): Promise<ProviderInfo | nu
         return s.resolvedProvider;
     }
 
-    s.log("[code-buddy] No LLM provider found (SDK, local opencode.json, or global opencode.json)");
+    s.log("[code-buddy] No LLM provider found (local opencode.json or global opencode.json)");
     return null;
 }
 
