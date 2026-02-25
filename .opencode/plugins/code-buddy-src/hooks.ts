@@ -11,7 +11,7 @@ import type { MemoryType, MemoryEntry, ErrorType, Observation } from "./types";
 import { MEMORY_TYPE_CATEGORY, VALID_MEMORY_TYPES } from "./types";
 import { generateId, formatTime, nowTimestamp, searchText, calculateSimilarity, calculateGuideRelevance } from "./helpers";
 import { detectSessionType, saveMemoryWithSyncDedup } from "./dedup";
-import { askAI, addMemoryWithDedup, extractJSON, extractJSONArray } from "./llm";
+import { askAI, addMemoryWithDedup, extractJSON, extractJSONArray, isLLMAvailable } from "./llm";
 import type { PluginState } from "./state";
 
 // ============================================
@@ -144,30 +144,42 @@ export function createHooks(s: PluginState) {
 
             s.log(`[code-buddy] 👁️ Observed: ${input.tool}${fileEdited ? ` → ${fileEdited}` : ""}${isWriteAction ? " [write]" : ""} (title: ${output.title || "none"})`);
 
-            // Inject relevant project guides on write actions.
-            // Retry up to MAX_GUIDE_MATCH_ATTEMPTS times — the first write may be a config
-            // file with poor context, so allow later, more informative writes to match.
-            if (!guidesInjected && isWriteAction && s.memories.length > 0 && guideMatchAttempts < MAX_GUIDE_MATCH_ATTEMPTS) {
+            // Inject relevant project guides on actual file writes/edits.
+            // Only trigger when fileEdited is set (write/edit tools) — NOT bash commands
+            // like `ls -la` which have no meaningful content for guide matching.
+            // Only trigger on code files — docs (.md, .txt) and config (.json, .yaml) have
+            // poor search context and would match wrong guides before the real code file.
+            // Retry up to MAX_GUIDE_MATCH_ATTEMPTS times — the first code write may be a
+            // config file with poor context, so allow later, more informative writes to match.
+            const fileExt = fileEdited?.split(".").pop()?.toLowerCase() || "";
+            const isCodeFile = ["html", "js", "ts", "jsx", "tsx", "css", "scss", "py", "go", "rs", "java", "cpp", "c", "rb", "php", "svelte", "vue"].includes(fileExt);
+            if (!guidesInjected && fileEdited && isCodeFile && s.memories.length > 0 && guideMatchAttempts < MAX_GUIDE_MATCH_ATTEMPTS) {
                 guideMatchAttempts++;
 
-                // Extract key identifiers from the file content for search
+                // Build intent-based search context — match on WHAT the project does,
+                // not implementation-level function names.
                 const fileContent = String(inputArgs.content || "");
                 const searchParts: string[] = [];
 
-                // Extract HTML <title>
+                // 1. SPEC.md content — the user's actual requirements (best signal)
+                const specContent = extractSpecContent(s.observationBuffer);
+                if (specContent) searchParts.push(specContent);
+
+                // 2. Domain keywords — conceptual nouns from identifiers and HTML text
+                const domainKw = extractDomainKeywords(fileContent);
+                if (domainKw.length > 0) searchParts.push(domainKw.join(" "));
+
+                // 3. HTML <title> — project identity
                 const titleMatch = fileContent.match(/<title>(.+?)<\/title>/i);
                 if (titleMatch) searchParts.push(titleMatch[1]);
 
-                // Extract file name
-                if (fileEdited) searchParts.push(fileEdited.split("/").pop() || "");
-
-                // Extract function names (key identifiers)
-                const funcNames = fileContent.match(/function\s+(\w+)/g);
-                if (funcNames) searchParts.push(...funcNames.slice(0, 8).map((f) => f.replace("function ", "")));
-
-                // Extract key game/app terms from title and output
-                if (output.title) searchParts.push(output.title);
-                if (inputArgs.command) searchParts.push(String(inputArgs.command));
+                // 4. Function names — last-resort fallback only when nothing else available
+                if (searchParts.length === 0) {
+                    if (fileEdited) searchParts.push(fileEdited.split("/").pop() || "");
+                    const funcNames = fileContent.match(/function\s+(\w+)/g);
+                    if (funcNames) searchParts.push(...funcNames.slice(0, 8).map((f) => f.replace("function ", "")));
+                    if (output.title) searchParts.push(output.title);
+                }
 
                 const searchCtx = searchParts.join(" ");
                 s.log(`[code-buddy] 📚 Searching ${s.memories.length} memories for guides (attempt ${guideMatchAttempts}/${MAX_GUIDE_MATCH_ATTEMPTS}, context: "${searchCtx.substring(0, 80)}")`);
@@ -417,6 +429,50 @@ function classifyIntent(buf: Observation[], editedFiles: string[], hasErrors: bo
     return { intent: "task-execution", type: "note" };
 }
 
+// ---- LLM refinement for rule-extracted summaries ----
+
+/**
+ * Ask the LLM to clean a rule-extracted memory summary.
+ * Rules do fast pattern-matching but leak generic code words (handler, key, pressed).
+ * The LLM judges which words are true domain entities vs noise.
+ *
+ * Returns the original summary unchanged if LLM is unavailable or fails.
+ */
+async function refineWithLLM(s: PluginState, summary: string): Promise<string> {
+    if (!(await isLLMAvailable(s))) return summary;
+    if (summary.length < 30) return summary;
+
+    const prompt = `Clean this project memory summary. Remove generic code words that aren't specific to the project's domain.
+
+DRAFT:
+${summary}
+
+Rules:
+- "Key objects" should only list real domain entities the user cares about (paddle, ball, bricks, snake, food, tile, enemy, player, inventory). Remove generic programming words (handler, key, pressed, game, overlap, over, particles, trail, display, screen, collisions, message, etc.)
+- "Controls" should say what the player controls and how (e.g. "paddle via mouse, movement via arrow keys"). Don't say "mouse movement" alone — say what is moved.
+- Keep all other lines (Project, Architecture, Game loop, Physics, Collision, Game state, Persistence, Font, Audio, UI headings, UI buttons) — just fix obvious noise in them.
+- Return the cleaned summary in the exact same "Key: value. Key: value." format.
+- If Key objects would be empty after cleaning, drop that line entirely.
+- Do NOT add information that wasn't in the draft. Only clean/filter.
+
+Respond with ONLY the cleaned summary text, no explanation.`;
+
+    try {
+        const response = await askAI(s, prompt);
+        // Validate: must still look like a summary (has "Project:" or similar markers)
+        const cleaned = response.trim();
+        if (cleaned.length < 20) return summary;
+        if (cleaned.startsWith("[AI Analysis")) return summary; // askAI fallback marker
+        if (/^(Project|Key objects|Architecture|Controls|Game)/i.test(cleaned)) {
+            s.log(`[code-buddy] 🧹 LLM refined summary (${summary.length} → ${cleaned.length} chars)`);
+            return cleaned;
+        }
+        return summary;
+    } catch {
+        return summary;
+    }
+}
+
 /**
  * Build meaningful fallback entries from raw observation data.
  * Used when AI classification fails or no LLM is available.
@@ -471,8 +527,32 @@ function buildFallbackEntries(
         }
 
         if (analyses.length > 0) {
+            // Sort analysis lines by importance — ensures truncation preserves the most useful info
+            const priorityOrder: [RegExp, number][] = [
+                [/^Project:/i, 0],
+                [/^UI headings:/i, 1],
+                [/^Key objects:/i, 2],
+                [/^Controls:/i, 3],
+                [/^Game state:/i, 4],
+                [/^UI buttons:/i, 5],
+                [/^Architecture:/i, 6],
+                [/^Game loop:/i, 7],
+                [/^Physics:/i, 8],
+                [/^Collision:/i, 9],
+                [/^Persistence:/i, 10],
+                [/^Font:/i, 11],
+                [/^Audio:/i, 12],
+            ];
+            const getPriority = (line: string): number => {
+                for (const [pattern, pri] of priorityOrder) {
+                    if (pattern.test(line)) return pri;
+                }
+                return 99;
+            };
+            analyses.sort((a, b) => getPriority(a) - getPriority(b));
+
             // Join the structural insights into a readable summary
-            summary = analyses.slice(0, 10).join(". ").replace(/\.\./g, ".");
+            summary = analyses.slice(0, 15).join(". ").replace(/\.\./g, ".");
         } else {
             // No file-level insights — try bash command descriptions
             const cmds = buf
@@ -609,6 +689,10 @@ Respond ONLY with valid JSON:
     if (entries.length === 0) {
         // Rule-based fallback — extract meaningful info from observations
         const fallback = buildFallbackEntries(buf, editedFiles, hasErrors);
+        // Refine rule-based summaries with LLM (no-op if LLM unavailable)
+        for (const entry of fallback) {
+            entry.summary = await refineWithLLM(s, entry.summary);
+        }
         entries = fallback;
     }
 
@@ -698,7 +782,7 @@ Respond ONLY with valid JSON:
         const entry = fallback[0];
         parsed = {
             title: entry.title,
-            summary: entry.summary,
+            summary: await refineWithLLM(s, entry.summary),
             type: entry.type,
             tags: entry.tags,
         };
@@ -998,6 +1082,12 @@ function flushBuildSession(s: PluginState, buf: Observation[], editedFiles: stri
         `## ${projectName || fileNames.join(", ")}`,
     ];
 
+    // SPEC.md requirements — primary matching surface for future guide lookups
+    const specContent = extractSpecContent(buf);
+    if (specContent) {
+        sections.push("", "### Requirements", specContent);
+    }
+
     // Architecture decision
     if (editedFiles.length === 1 && editedFiles[0].endsWith(".html")) {
         sections.push("Architecture: Single-file app (all code in one HTML file)");
@@ -1111,70 +1201,64 @@ function analyzeHTML(fileName: string, content: string): { summary: string; tags
     const title = content.match(/<title>(.+?)<\/title>/i);
     if (title) lines.push(`Project: "${title[1]}"`);
 
-    // Architecture decision — single-file vs multi-file (this is a design decision worth recording)
+    // Architecture decision — single-file vs multi-file, canvas vs DOM
     const hasInlineCSS = /<style[\s>]/i.test(content);
     const hasInlineJS = /<script[\s>]/i.test(content);
     const externalCSS = content.match(/href="([^"]+\.css)"/gi) || [];
     const externalJS = content.match(/src="([^"]+\.js)"/gi) || [];
+    const hasCanvas = /<canvas/i.test(content);
+    const renderType = hasCanvas ? "canvas" : "DOM";
     if (hasInlineCSS && hasInlineJS && externalCSS.length === 0 && externalJS.length === 0) {
-        lines.push("Architecture: Single-file app (all CSS + JS embedded in HTML)");
+        lines.push(`Architecture: Single-file ${renderType} app`);
         tags.push("single-file-app");
     } else if (externalCSS.length > 0 || externalJS.length > 0) {
         const externals = [...externalCSS, ...externalJS].map((e) => e.match(/["']([^"']+)["']/)?.[1] || "").filter(Boolean);
-        if (externals.length > 0) lines.push(`External assets: ${externals.join(", ")}`);
+        if (externals.length > 0) lines.push(`Architecture: Multi-file ${renderType} app (${externals.join(", ")})`);
     }
 
-    // Color theme / visual style — extract CSS variables, key colors, gradients
-    const cssVars = content.match(/--[\w-]+:\s*[^;]+/g) || [];
-    if (cssVars.length > 0) {
-        const colorVars = cssVars.filter((v) => /color|bg|background|accent|primary|secondary|border|shadow|theme/i.test(v.split(":")[0]));
-        if (colorVars.length > 0) {
-            const palette = colorVars.slice(0, 6).map((v) => v.trim()).join("; ");
-            lines.push(`Color theme: CSS variables (${palette})`);
-            tags.push("css-variables");
-        } else {
-            const allVars = cssVars.slice(0, 5).map((v) => v.split(":")[0].trim());
-            lines.push(`CSS custom properties: ${allVars.join(", ")}`);
+    // Domain objects — the key entities of the project (paddle, ball, bricks, score)
+    // These are extracted from identifier nouns, not raw function names.
+    const domainObjs = extractDomainObjects(content);
+    if (domainObjs.length > 0) {
+        lines.push(`Key objects: ${domainObjs.slice(0, 12).join(", ")}`);
+    }
+
+    // UI headings — visible text that describes what the project shows
+    const headings = content.match(/<h[1-6][^>]*>([^<]+)<\/h[1-6]>/gi) || [];
+    const headingTexts = headings.map((h) => h.replace(/<[^>]+>/g, "").trim()).filter(Boolean);
+    if (headingTexts.length > 0) {
+        lines.push(`UI headings: ${headingTexts.slice(0, 5).join(", ")}`);
+    }
+
+    // UI buttons — interactive elements
+    const buttons = content.match(/<button[^>]*>([^<]+)<\/button>/gi) || [];
+    const buttonTexts = buttons.map((b) => b.replace(/<[^>]+>/g, "").trim()).filter(Boolean);
+    if (buttonTexts.length > 0) {
+        lines.push(`UI buttons: ${[...new Set(buttonTexts)].slice(0, 5).join(", ")}`);
+    }
+
+    // Font — simplified to just the name
+    const googleFonts = content.match(/fonts\.googleapis\.com\/css2?\?family=([^"&]+)/i);
+    if (googleFonts) {
+        const fontName = decodeURIComponent(googleFonts[1]).replace(/\+/g, " ").split(":")[0];
+        lines.push(`Font: ${fontName}`);
+    } else {
+        const fontFamilies = content.match(/font-family:\s*([^;}{]+)/gi) || [];
+        if (fontFamilies.length > 0) {
+            const fonts = [...new Set(fontFamilies.map((f) => f.replace(/font-family:\s*/i, "").trim().split(",")[0].replace(/['"]/g, "")))];
+            if (fonts.length > 0 && fonts[0].length > 0) lines.push(`Font: ${fonts[0]}`);
         }
     }
 
-    // Gradients — visual style signature
-    const gradients = content.match(/(?:linear|radial|conic)-gradient\([^)]+\)/gi) || [];
-    if (gradients.length > 0) {
-        lines.push(`Gradients: ${gradients.length} gradient(s) used (${gradients[0].substring(0, 80)})`);
-    }
-
-    // Typography — font choices affect style identity
-    const fontFamilies = content.match(/font-family:\s*([^;}{]+)/gi) || [];
-    const googleFonts = content.match(/fonts\.googleapis\.com\/css2?\?family=([^"&]+)/i);
-    if (googleFonts) {
-        lines.push(`Typography: Google Fonts (${decodeURIComponent(googleFonts[1]).replace(/\+/g, " ")})`);
-    } else if (fontFamilies.length > 0) {
-        const fonts = [...new Set(fontFamilies.map((f) => f.replace(/font-family:\s*/i, "").trim()))];
-        lines.push(`Typography: ${fonts.slice(0, 3).join(", ")}`);
-    }
-
-    // Core data structures — look for state initialization patterns
-    const statePatterns = content.match(/(?:let|const|var)\s+(\w+)\s*=\s*(\[[\s\S]{0,100}?\]|\{[\s\S]{0,100}?\}|new\s+\w+[\s\S]{0,60}?[;)\n])/g) || [];
-    const meaningfulState = statePatterns.filter((s) => {
-        // Skip trivial assignments like `const x = {}`
-        return s.length > 20 && !/=\s*\{\s*\}/.test(s) && !/=\s*\[\s*\]/.test(s);
-    });
-    if (meaningfulState.length > 0) {
-        const stateDesc = meaningfulState.slice(0, 3).map((s) => s.substring(0, 80).trim()).join("; ");
-        lines.push(`Core state: ${stateDesc}`);
-        tags.push("state-management");
-    }
-
-    // Game loop / update pattern — HOW the system updates, not just that it exists
+    // Game loop / update pattern
     if (/requestAnimationFrame/i.test(content)) {
         const deltaTime = /delta|dt|elapsed|lastTime|previousTime/i.test(content);
-        lines.push(`Update loop: requestAnimationFrame${deltaTime ? " with delta-time" : " (fixed frame)"}`);
+        lines.push(`Game loop: frame-based${deltaTime ? " with delta-time" : ""}`);
         tags.push("game-loop");
     } else {
         const intervals = content.match(/setInterval\s*\([^,]+,\s*(\d+)\)/);
         if (intervals) {
-            lines.push(`Update loop: setInterval at ${intervals[1]}ms`);
+            lines.push(`Game loop: interval-based at ${intervals[1]}ms`);
             tags.push("timer-based");
         }
     }
@@ -1184,7 +1268,7 @@ function analyzeHTML(fileName: string, content: string): { summary: string; tags
         const gravity = /gravity|gravit/i.test(content);
         const friction = /friction|drag|damping/i.test(content);
         const extras = [gravity ? "gravity" : "", friction ? "friction" : ""].filter(Boolean);
-        lines.push(`Physics: velocity-based movement${extras.length > 0 ? ` with ${extras.join(" & ")}` : ""}`);
+        lines.push(`Physics: velocity-based${extras.length > 0 ? ` with ${extras.join(", ")}` : " movement"}`);
         tags.push("physics");
     }
 
@@ -1198,16 +1282,17 @@ function analyzeHTML(fileName: string, content: string): { summary: string; tags
         tags.push("collision-detection");
     }
 
-    // Input handling — what controls exist and how they map
+    // Input handling — describe input methods
     const keyHandler = content.match(/addEventListener\s*\(\s*['"]key(down|up|press)['"]/gi);
     const mouseHandler = content.match(/addEventListener\s*\(\s*['"](click|mouse\w+|touch\w+)['"]/gi);
     const controls: string[] = [];
-    if (keyHandler) controls.push("keyboard");
-    if (mouseHandler) controls.push("mouse/touch");
+    if (/mousemove/i.test(content)) controls.push("mouse movement");
+    else if (mouseHandler) controls.push("mouse/click");
     if (/ArrowLeft|ArrowRight|ArrowUp|ArrowDown/i.test(content)) controls.push("arrow keys");
+    else if (keyHandler && !controls.some((c) => c.includes("arrow"))) controls.push("keyboard");
     if (/['"](w|a|s|d)['"]/i.test(content) && /key/i.test(content)) controls.push("WASD");
-    if (/touchstart|touchmove|touchend/i.test(content) && !mouseHandler) controls.push("touch gestures");
-    if (/swipe|gesture/i.test(content)) controls.push("swipe gestures");
+    if (/touchstart|touchmove|touchend/i.test(content)) controls.push("touch");
+    if (/swipe|gesture/i.test(content)) controls.push("swipe");
     if (controls.length > 0) lines.push(`Controls: ${controls.join(", ")}`);
 
     // Scoring / UI state
@@ -1218,12 +1303,8 @@ function analyzeHTML(fileName: string, content: string): { summary: string; tags
         lines.push(`Game state: ${varNames.join(", ")}`);
     }
 
-    // Canvas usage — dimensions matter for understanding coordinate system
-    const canvas = content.match(/<canvas[^>]*(?:width="(\d+)")[^>]*(?:height="(\d+)")?/i);
-    if (canvas && canvas[1] && canvas[2]) {
-        lines.push(`Canvas: ${canvas[1]}x${canvas[2]} coordinate space`);
-        tags.push("canvas-rendering");
-    } else if (/<canvas/i.test(content)) {
+    // Canvas — just tag it, don't record dimensions (implementation detail)
+    if (/<canvas/i.test(content)) {
         tags.push("canvas-rendering");
     }
 
@@ -1234,39 +1315,18 @@ function analyzeHTML(fileName: string, content: string): { summary: string; tags
         lines.push(`Persistence: localStorage${keyNames.length > 0 ? ` (keys: ${keyNames.join(", ")})` : ""}`);
     }
 
-    // Rendering approach — DOM vs canvas, plus specifics
+    // Rendering approach — simplified (canvas vs DOM)
     if (/<canvas/i.test(content) && /\.getContext|ctx\./i.test(content)) {
-        const drawCalls = [];
-        if (/fillRect|strokeRect/i.test(content)) drawCalls.push("rects");
-        if (/arc\s*\(|beginPath/i.test(content)) drawCalls.push("paths/arcs");
-        if (/drawImage/i.test(content)) drawCalls.push("sprites");
-        if (/fillText|strokeText/i.test(content)) drawCalls.push("text");
-        lines.push(`Rendering: canvas 2D context${drawCalls.length > 0 ? ` (${drawCalls.join(", ")})` : ""}`);
+        // Already captured as "canvas-rendering" tag and architecture line
     } else if (/innerHTML|appendChild|createElement|\.textContent/i.test(content)) {
-        lines.push("Rendering: DOM manipulation");
         tags.push("dom-rendering");
     }
 
-    // Responsive / mobile meta
-    if (/viewport/i.test(content) && /width=device-width/i.test(content)) {
-        lines.push("Responsive: viewport meta tag set");
-    }
-
-    // Audio
+    // Audio — simplified
     if (/new\s+Audio|\.play\s*\(|AudioContext|createOscillator/i.test(content)) {
         const webAudio = /AudioContext|createOscillator/i.test(content);
-        lines.push(`Audio: ${webAudio ? "Web Audio API (procedural)" : "HTML5 Audio elements"}`);
+        lines.push(`Audio: ${webAudio ? "Web Audio API" : "HTML5 Audio"}`);
         tags.push("audio");
-    }
-
-    // Key algorithms — look for sort, search, pathfinding, recursion patterns
-    if (/\.sort\s*\(/i.test(content)) {
-        const customSort = content.match(/\.sort\s*\(\s*\(([^)]+)\)\s*=>/);
-        if (customSort) lines.push(`Sorting: custom comparator (${customSort[1].trim()})`);
-    }
-    if (/Math\.random/i.test(content)) {
-        const randomUsage = /shuffle|randomize|spawn|generate|place/i.test(content);
-        if (randomUsage) lines.push("Randomization: used for spawning/generation");
     }
 
     if (lines.length === 0) return { summary: "", tags: [] };
@@ -1608,6 +1668,12 @@ function analyzeJS(fileName: string, content: string): { summary: string; tags: 
         tags.push("testing");
     }
 
+    // Domain objects — key entities extracted from identifier nouns
+    const jsDomainObjs = extractDomainObjects(content);
+    if (jsDomainObjs.length > 0) {
+        lines.push(`Key objects: ${jsDomainObjs.slice(0, 12).join(", ")}`);
+    }
+
     // Naming conventions — detect camelCase vs snake_case vs kebab-case
     const fnNames = content.match(/(?:function|const|let)\s+([a-z]\w+)/g) || [];
     if (fnNames.length >= 5) {
@@ -1874,4 +1940,243 @@ function analyzeSQL(fileName: string, content: string): { summary: string; tags:
 function analyzeMD(fileName: string, _content: string): { summary: string; tags: string[] } {
     // Markdown files are documentation — the content IS the understanding, no need to re-extract
     return { summary: "", tags: ["docs"] };
+}
+
+// ---- Domain extraction helpers for intent-based matching ----
+
+/** Common verb prefixes in code identifiers that should be stripped to get domain nouns. */
+const VERB_PREFIXES = [
+    "draw", "render", "update", "init", "check", "handle", "on", "get", "set",
+    "create", "build", "make", "add", "remove", "delete", "reset", "start",
+    "stop", "is", "has", "can", "should", "compute", "calculate", "process",
+    "load", "save", "fetch", "parse", "validate", "show", "hide", "toggle",
+    "enable", "disable", "register", "emit", "dispatch", "trigger", "apply",
+    "setup", "teardown", "destroy", "clear", "find", "search", "filter",
+    "sort", "map", "reduce", "transform", "convert", "format", "normalize",
+];
+
+/**
+ * Generic code nouns that appear in almost any JS/HTML project.
+ * These are NOT domain-specific and should be filtered from "Key objects".
+ */
+const CODE_NOISE_NOUNS = new Set([
+    // Programming constructs
+    "game", "app", "data", "info", "item", "items", "list", "array", "object",
+    "value", "values", "result", "results", "error", "errors", "type", "types",
+    "name", "names", "text", "string", "number", "index", "count", "total",
+    "flag", "state", "status", "config", "options", "params", "args", "props",
+    // DOM / UI generic
+    "element", "elements", "container", "wrapper", "content", "section",
+    "header", "footer", "body", "main", "div", "span", "btn", "button",
+    "input", "output", "label", "form", "link", "image", "icon",
+    "display", "screen", "overlay", "modal", "popup", "tooltip", "menu",
+    "message", "messages", "notification",
+    // Event / control generic
+    "handler", "handlers", "listener", "callback", "event", "events",
+    "key", "keys", "pressed", "click", "mouse", "touch",
+    // Visual / rendering generic
+    "color", "colors", "style", "styles", "class", "classes",
+    "width", "height", "size", "pos", "position", "rect",
+    "ctx", "context", "canvas", "pixel", "pixels",
+    "glow", "effect", "effects", "particle", "particles", "trail", "trails",
+    "background", "foreground", "border", "shadow", "opacity", "alpha",
+    "gradient", "animation", "transition",
+    // Math / geometry generic
+    "angle", "radius", "speed", "velocity", "delta", "time", "elapsed",
+    "min", "max", "step", "offset", "gap", "margin", "padding",
+    // Data flow generic
+    "temp", "tmp", "current", "prev", "next", "old", "new",
+    "start", "end", "left", "right", "top", "bottom", "center",
+    // Common code fragments from camelCase splitting
+    "over", "down", "up", "off", "out", "back", "info", "all", "none",
+    "true", "false", "null", "undefined", "default",
+    // Collision-related (generic pattern, not domain-specific)
+    "overlap", "collisions", "collision",
+]);
+
+/**
+ * Split camelCase/PascalCase identifiers into separate words.
+ * e.g. "drawPaddle" → ["draw", "Paddle"], "checkCollision" → ["check", "Collision"]
+ */
+function splitCamelCase(name: string): string[] {
+    return name
+        .replace(/([a-z])([A-Z])/g, "$1 $2")
+        .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+        .split(/\s+/)
+        .map((w) => w.toLowerCase())
+        .filter((w) => w.length > 1);
+}
+
+/**
+ * Strip verb prefixes from an identifier to get the domain noun.
+ * e.g. "drawPaddle" → "paddle", "checkCollision" → "collision", "updateBall" → "ball"
+ * Returns empty string if the identifier IS just a verb with no noun.
+ */
+function stripVerbPrefix(name: string): string {
+    const parts = splitCamelCase(name);
+    if (parts.length <= 1) return "";
+    const first = parts[0];
+    if (VERB_PREFIXES.includes(first)) {
+        return parts.slice(1).join("");
+    }
+    return "";
+}
+
+/**
+ * Extract domain objects from code content — strip verb prefixes from function/variable
+ * names, return nouns appearing 2+ times. These represent the key entities of the project
+ * (paddle, ball, bricks, score, etc.) rather than implementation details.
+ */
+function extractDomainObjects(content: string): string[] {
+    // Extract all function and variable names
+    const funcNames = content.match(/function\s+(\w+)/g) || [];
+    const arrowFuncs = content.match(/(?:const|let|var)\s+(\w+)\s*=\s*(?:\([^)]*\)|[\w]+)\s*=>/g) || [];
+    const varDecls = content.match(/(?:let|const|var)\s+(\w+)\s*=/g) || [];
+
+    const allNames = [
+        ...funcNames.map((f) => f.replace("function ", "")),
+        ...arrowFuncs.map((f) => f.match(/(?:const|let|var)\s+(\w+)/)?.[1] || "").filter(Boolean),
+        ...varDecls.map((v) => v.match(/(?:let|const|var)\s+(\w+)/)?.[1] || "").filter(Boolean),
+    ];
+
+    /** Check if a word is a domain noun (not a verb prefix or generic code noun). */
+    const isDomainNoun = (w: string): boolean =>
+        w.length > 2 && !VERB_PREFIXES.includes(w) && !CODE_NOISE_NOUNS.has(w);
+
+    // Count domain nouns (verb-stripped)
+    const nounCounts = new Map<string, number>();
+    for (const name of allNames) {
+        const noun = stripVerbPrefix(name);
+        if (noun && isDomainNoun(noun)) {
+            nounCounts.set(noun, (nounCounts.get(noun) || 0) + 1);
+        }
+        // Also count the full name's camelCase parts as nouns
+        const parts = splitCamelCase(name);
+        for (const part of parts) {
+            if (isDomainNoun(part)) {
+                nounCounts.set(part, (nounCounts.get(part) || 0) + 1);
+            }
+        }
+    }
+
+    // Also extract nouns from id/class attribute names in HTML
+    const idClassNames = content.match(/(?:id|class)=["']([^"']+)["']/gi) || [];
+    for (const attr of idClassNames) {
+        const val = attr.match(/=["']([^"']+)["']/)?.[1] || "";
+        const words = val.split(/[\s-_]+/).filter((w) => w.length > 2);
+        for (const w of words) {
+            const lower = w.toLowerCase();
+            if (isDomainNoun(lower)) {
+                nounCounts.set(lower, (nounCounts.get(lower) || 0) + 1);
+            }
+        }
+    }
+
+    // Deduplicate singular/plural — keep the more frequent form
+    const deduped = new Map<string, number>();
+    for (const [noun, count] of nounCounts) {
+        const singular = noun.endsWith("s") ? noun.slice(0, -1) : noun;
+        const plural = noun.endsWith("s") ? noun : noun + "s";
+        const otherForm = nounCounts.get(noun.endsWith("s") ? singular : plural);
+        if (otherForm !== undefined) {
+            // Keep whichever form has higher count; on tie keep singular
+            const combinedCount = count + otherForm;
+            if (!deduped.has(singular) && !deduped.has(plural)) {
+                deduped.set(count >= otherForm ? noun : (noun.endsWith("s") ? singular : plural), combinedCount);
+            }
+        } else {
+            if (!deduped.has(singular) && !deduped.has(plural)) {
+                deduped.set(noun, count);
+            }
+        }
+    }
+
+    // Return nouns appearing 2+ times, sorted by frequency
+    return [...deduped.entries()]
+        .filter(([, count]) => count >= 2)
+        .sort((a, b) => b[1] - a[1])
+        .map(([noun]) => noun)
+        .slice(0, 10);
+}
+
+/**
+ * Extract domain keywords from HTML/code content — conceptual nouns from identifiers
+ * (by splitting camelCase and stripping verb prefixes), HTML visible text (<h1>, <h2>,
+ * <button> labels), and id/class names.
+ */
+function extractDomainKeywords(content: string): string[] {
+    const keywords = new Set<string>();
+
+    // 1. Domain objects from identifiers
+    for (const obj of extractDomainObjects(content)) {
+        keywords.add(obj);
+    }
+
+    // 2. HTML visible text from headings
+    const headings = content.match(/<h[1-6][^>]*>([^<]+)<\/h[1-6]>/gi) || [];
+    for (const h of headings) {
+        const text = h.replace(/<[^>]+>/g, "").trim();
+        for (const word of text.split(/\s+/)) {
+            const lower = word.toLowerCase().replace(/[^\w]/g, "");
+            if (lower.length > 2) keywords.add(lower);
+        }
+    }
+
+    // 3. Button labels
+    const buttons = content.match(/<button[^>]*>([^<]+)<\/button>/gi) || [];
+    for (const b of buttons) {
+        const text = b.replace(/<[^>]+>/g, "").trim();
+        for (const word of text.split(/\s+/)) {
+            const lower = word.toLowerCase().replace(/[^\w]/g, "");
+            if (lower.length > 2) keywords.add(lower);
+        }
+    }
+
+    // 4. id and class names (split by hyphens/underscores)
+    const idClassNames = content.match(/(?:id|class)=["']([^"']+)["']/gi) || [];
+    for (const attr of idClassNames) {
+        const val = attr.match(/=["']([^"']+)["']/)?.[1] || "";
+        for (const word of val.split(/[\s\-_]+/)) {
+            const lower = word.toLowerCase();
+            if (lower.length > 2 && !VERB_PREFIXES.includes(lower)) {
+                keywords.add(lower);
+            }
+        }
+    }
+
+    return [...keywords];
+}
+
+/**
+ * Scan observation buffer for SPEC.md / README.md / requirements .md file writes,
+ * and return their cleaned text content. This is the user's actual requirement —
+ * the best matching signal for guide discovery.
+ */
+function extractSpecContent(buf: Observation[]): string {
+    const specParts: string[] = [];
+
+    for (const o of buf) {
+        if (!o.isWriteAction || !o.fileEdited) continue;
+        const fileName = o.fileEdited.split("/").pop()?.toLowerCase() || "";
+        // Match SPEC.md, README.md, requirements.md, spec.md etc.
+        if (!/\.md$/i.test(fileName)) continue;
+        if (!/spec|readme|requirement|design|brief/i.test(fileName)) continue;
+
+        // Extract content from the observation args
+        const content = String(o.args?.content || o.result || "");
+        if (!content || content.length < 20) continue;
+
+        // Clean markdown — strip headers/formatting, keep the substance
+        const cleaned = content
+            .replace(/^#{1,6}\s+/gm, "")  // strip heading markers
+            .replace(/[*_~`]/g, "")         // strip formatting
+            .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")  // links → text
+            .replace(/\n{2,}/g, " ")        // collapse newlines
+            .trim()
+            .substring(0, 500);
+
+        if (cleaned.length > 10) specParts.push(cleaned);
+    }
+
+    return specParts.join(" ").substring(0, 800);
 }

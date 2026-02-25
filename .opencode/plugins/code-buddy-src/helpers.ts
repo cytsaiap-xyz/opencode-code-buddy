@@ -54,6 +54,11 @@ const SIMILARITY_STOP_WORDS = new Set([
     "the", "and", "for", "with", "from", "that", "this", "are", "was",
     "merged", "title", "content", "max", "chars", "combine", "key",
     "points", "remove", "duplicates",
+    // Spec/requirements noise words
+    "should", "must", "will", "need", "create", "build", "implement",
+    "feature", "include", "using", "make", "also", "each", "when",
+    "have", "been", "into", "like", "some", "only", "about", "more",
+    "than", "can", "could", "would",
 ]);
 
 /** Tokenise text into a word set: strip punctuation, filter noise. No camelCase splitting. */

@@ -35,6 +35,18 @@ describe("calculateSimilarity", () => {
         expect(calculateSimilarity("I am a go to is", "I am a go to is")).toBe(0);
     });
 
+    it("excludes spec/requirements noise words from comparison", () => {
+        // All words from the new spec noise additions
+        expect(calculateSimilarity(
+            "should must will need create build implement feature include using make",
+            "should must will need create build implement feature include using make",
+        )).toBe(0);
+        expect(calculateSimilarity(
+            "also each when have been into like some only about more than can could would",
+            "also each when have been into like some only about more than can could would",
+        )).toBe(0);
+    });
+
     it("is case insensitive", () => {
         expect(calculateSimilarity("Snake Game Canvas", "snake game canvas")).toBe(1);
     });
