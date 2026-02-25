@@ -5,7 +5,9 @@
     "type": "module",
     "main": ".opencode/plugins/code-buddy.ts",
     "scripts": {
-        "install": "bash install.sh"
+        "install": "bash install.sh",
+        "test": "vitest run",
+        "test:watch": "vitest"
     },
     "dependencies": {
         "@opencode-ai/plugin": "latest",
@@ -13,7 +15,8 @@
     },
     "devDependencies": {
         "@types/node": "^25.3.0",
-        "typescript": "^5.0.0"
+        "typescript": "^5.0.0",
+        "vitest": "^4.0.18"
     },
     "keywords": [
         "opencode",
