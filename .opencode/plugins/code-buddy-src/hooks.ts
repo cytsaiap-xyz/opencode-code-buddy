@@ -31,6 +31,13 @@ function isWriteTool(toolName: string): boolean {
     return WRITE_TOOL_PATTERNS.some((p) => lower.includes(p));
 }
 
+/** Safely serialize a value — handles circular references and Error objects. */
+function safeStringify(v: unknown, maxLen = 200): string {
+    if (typeof v === "string") return v.substring(0, maxLen);
+    if (v instanceof Error) return `${v.name}: ${v.message}`.substring(0, maxLen);
+    try { return JSON.stringify(v).substring(0, maxLen); } catch { return String(v).substring(0, maxLen); }
+}
+
 // ============================================
 // Session ID extraction for multi-agent support
 // ============================================
@@ -703,7 +710,7 @@ async function processFullAutoObserver(s: PluginState, buf: Observation[], deleg
     const observationSummary = buf.map((o) => {
         const time = formatTime(o.timestamp);
         const argsStr = o.args
-            ? ` (${Object.entries(o.args).map(([k, v]) => `${k}: ${typeof v === "string" ? v.substring(0, 200) : JSON.stringify(v).substring(0, 200)}`).join(", ")})`
+            ? ` (${Object.entries(o.args).map(([k, v]) => `${k}: ${safeStringify(v)}`).join(", ")})`
             : "";
         return `[${time}] ${o.tool}${argsStr}${o.result ? `\n  → ${o.result}` : ""}${o.hasError ? " ❌ ERROR" : ""}`;
     }).join("\n");
@@ -817,7 +824,7 @@ async function processSingleSummaryObserver(s: PluginState, buf: Observation[], 
     const observationSummary = buf.map((o) => {
         const time = formatTime(o.timestamp);
         const argsStr = o.args
-            ? ` (${Object.entries(o.args).map(([k, v]) => `${k}: ${typeof v === "string" ? v.substring(0, 200) : JSON.stringify(v).substring(0, 200)}`).join(", ")})`
+            ? ` (${Object.entries(o.args).map(([k, v]) => `${k}: ${safeStringify(v)}`).join(", ")})`
             : "";
         return `[${time}] ${o.tool}${argsStr}${o.result ? `\n  → ${o.result}` : ""}${o.hasError ? " ❌ ERROR" : ""}`;
     }).join("\n");

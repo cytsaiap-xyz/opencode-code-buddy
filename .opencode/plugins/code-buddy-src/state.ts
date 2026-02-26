@@ -139,11 +139,12 @@ export class PluginState {
 
     // ---- Logging (respects verbose flag + persistent file) ----
 
-    /** Format args into a single log string. */
+    /** Format args into a single log string. Handles Error objects properly. */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     private formatLogArgs(args: any[]): string {
         return args.map((a) => {
             if (typeof a === "string") return a;
+            if (a instanceof Error) return `${a.name}: ${a.message}${a.stack ? `\n${a.stack}` : ""}`;
             try { return JSON.stringify(a); } catch { return String(a); }
         }).join(" ");
     }
