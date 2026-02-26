@@ -46,14 +46,22 @@ export function createHooks(s: PluginState) {
     const flushObservations = async (reason: string) => {
         if (flushState !== "idle" || s.observationBuffer.length === 0) return;
         flushState = "started";
-        s.log(`[code-buddy] 📤 Flushing observations (${reason}, ${s.observationBuffer.length} buffered)`);
+        // Snapshot the buffer and clear immediately — prevents concurrent
+        // subagent flushes from corrupting in-flight data or double-processing.
+        const snapshot = [...s.observationBuffer];
+        s.clearObservations();
+        // Reset per-session guide state so each flush cycle gets fresh matching
+        guidesInjected = false;
+        guideMatchAttempts = 0;
+        s.log(`[code-buddy] 📤 Flushing observations (${reason}, ${snapshot.length} buffered)`);
         try {
-            await handleSessionIdle(s);
+            await handleSessionIdle(s, snapshot);
             flushState = "completed";
             s.log(`[code-buddy] ✅ Async flush completed (${reason})`);
         } catch (err) {
             s.log(`[code-buddy] ❌ Async flush failed (${reason}):`, err);
-            // Fall back to sync save so we don't lose data
+            // Restore snapshot to buffer for sync fallback so data isn't lost
+            for (const obs of snapshot) s.pushObservation(obs);
             try { flushObservationsSync(s); } catch { /* best effort */ }
             flushState = "completed";
         }
@@ -79,11 +87,16 @@ export function createHooks(s: PluginState) {
         // ---- event: session lifecycle ----
         event: async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
             if (event.type === "session.idle") {
-                flushState = "idle"; // reset for next idle cycle
+                // Only reset flushState when no flush is in progress — prevents
+                // a subagent's idle event from interrupting the main agent's flush.
+                if (flushState !== "started") flushState = "idle";
                 await flushObservations("session.idle");
             }
             // Also flush when session ends (covers `opencode run`)
             if (event.type === "session.deleted") {
+                // Allow flush even after a previous cycle completed (subagent may
+                // have accumulated new observations after the main agent flushed).
+                if (flushState !== "started") flushState = "idle";
                 await flushObservations("session.deleted");
             }
         },
@@ -252,7 +265,7 @@ export function createHooks(s: PluginState) {
 // Internal handlers
 // ============================================
 
-async function handleSessionIdle(s: PluginState): Promise<void> {
+async function handleSessionIdle(s: PluginState, buf: Observation[]): Promise<void> {
     s.session.lastActivity = Date.now();
 
     // Reminder (only when NOT in fullAuto mode)
@@ -260,32 +273,30 @@ async function handleSessionIdle(s: PluginState): Promise<void> {
         s.log(`[code-buddy] 💡 Reminder: ${s.session.tasksCompleted} task(s) completed. Use buddy_done to record results.`);
     }
 
-    // Auto-observer
-    if (!s.config.hooks.autoObserve || s.observationBuffer.length < s.config.hooks.observeMinActions) return;
+    // Auto-observer — operates on the snapshot passed in, not s.observationBuffer,
+    // so concurrent subagent observations don't corrupt the in-flight processing.
+    if (!s.config.hooks.autoObserve || buf.length < s.config.hooks.observeMinActions) return;
 
     // Action-type filter: skip recording for read-only sessions (unless errors detected)
     if (s.config.hooks.requireEditForRecord) {
-        const hasWriteAction = s.observationBuffer.some((o) => o.isWriteAction);
-        const hasErrors = s.observationBuffer.some((o) => o.hasError);
+        const hasWriteAction = buf.some((o) => o.isWriteAction);
+        const hasErrors = buf.some((o) => o.hasError);
 
         if (!hasWriteAction && !hasErrors) {
             s.log("[code-buddy] 📖 Read-only session detected, skipping auto-record");
-            s.clearObservations();
             return;
         }
     }
 
     try {
         if (s.config.hooks.fullAuto) {
-            await processFullAutoObserver(s);
+            await processFullAutoObserver(s, buf);
         } else {
-            await processSingleSummaryObserver(s);
+            await processSingleSummaryObserver(s, buf);
         }
     } catch (err) {
         s.log("[code-buddy] Observer error:", err);
     }
-
-    s.clearObservations();
 }
 
 // ---- Shared types for auto-observer entries ----
@@ -623,8 +634,7 @@ function buildFallbackEntries(
 
 // ---- Full Auto: produce multiple categorised entries ----
 
-async function processFullAutoObserver(s: PluginState): Promise<void> {
-    const buf = s.observationBuffer;
+async function processFullAutoObserver(s: PluginState, buf: Observation[]): Promise<void> {
     const hasErrors = buf.some((o) => o.hasError);
     const editedFiles = [...new Set(buf.filter((o) => o.fileEdited).map((o) => o.fileEdited as string))];
 
@@ -735,8 +745,7 @@ Respond ONLY with valid JSON:
 
 // ---- Single summary mode ----
 
-async function processSingleSummaryObserver(s: PluginState): Promise<void> {
-    const buf = s.observationBuffer;
+async function processSingleSummaryObserver(s: PluginState, buf: Observation[]): Promise<void> {
 
     const observationSummary = buf.map((o) => {
         const time = formatTime(o.timestamp);
@@ -811,7 +820,10 @@ Respond ONLY with valid JSON:
  * that can help an AI agent recreate or extend the project later.
  */
 function flushObservationsSync(s: PluginState): void {
-    const buf = s.observationBuffer;
+    // Snapshot the buffer — saveMemoryWithSyncDedup calls s.clearObservations()
+    // internally, which would zero-out a live reference mid-processing.
+    const buf = [...s.observationBuffer];
+    s.clearObservations();
     if (buf.length < s.config.hooks.observeMinActions) return;
 
     // Check requireEditForRecord gate
