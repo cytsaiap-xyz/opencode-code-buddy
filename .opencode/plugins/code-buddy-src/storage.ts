@@ -18,6 +18,10 @@ export class LocalStorage {
         this.ensureDir();
     }
 
+    getBaseDir(): string {
+        return this.baseDir;
+    }
+
     private ensureDir(): void {
         if (!fs.existsSync(this.baseDir)) {
             fs.mkdirSync(this.baseDir, { recursive: true });

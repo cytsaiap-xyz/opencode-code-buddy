@@ -97,13 +97,11 @@ export function saveMemoryWithSyncDedup(
         existing.tags = [...new Set([...existing.tags, ...entry.tags])].slice(0, 10);
 
         s.saveMemories();
-        s.clearObservations();
         return existing;
     }
 
     // No match — save as new
     s.memories.push(entry);
     s.saveMemories();
-    s.clearObservations();
     return entry;
 }

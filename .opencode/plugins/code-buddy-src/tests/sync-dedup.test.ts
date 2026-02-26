@@ -13,7 +13,6 @@ describe("saveMemoryWithSyncDedup", () => {
         expect(s.memories[0]).toBe(entry);
         expect(result).toBe(entry);
         expect(s.saveMemories).toHaveBeenCalledOnce();
-        expect(s.clearObservations).toHaveBeenCalledOnce();
     });
 
     it("pushes new entry when no match above threshold", () => {
@@ -261,6 +260,5 @@ describe("saveMemoryWithSyncDedup", () => {
 
         saveMemoryWithSyncDedup(s, entry);
 
-        expect(s.clearObservations).toHaveBeenCalledOnce();
     });
 });
