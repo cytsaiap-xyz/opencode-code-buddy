@@ -85,12 +85,18 @@ export interface SessionState {
 
 export interface Observation {
     timestamp: string;
+    sessionId?: string;
     tool: string;
     args: Record<string, unknown>;
     result?: string;
     hasError: boolean;
     fileEdited?: string;
     isWriteAction: boolean;
+}
+
+export interface SessionBuffer {
+    observations: Observation[];
+    delegationContext?: string;
 }
 
 // ---- Pending Deletion ----

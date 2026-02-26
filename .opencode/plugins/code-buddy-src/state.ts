@@ -7,7 +7,7 @@
 
 import type {
     MemoryEntry, Entity, Relation, MistakeRecord,
-    SessionState, Observation, PendingDeletion, ProviderInfo, PluginConfig,
+    SessionState, Observation, SessionBuffer, PendingDeletion, ProviderInfo, PluginConfig,
 } from "./types";
 import { LocalStorage } from "./storage";
 import { getMemoryCategory, nowTimestamp } from "./helpers";
@@ -22,7 +22,8 @@ export class PluginState {
     // Runtime-only
     session: SessionState;
     pendingDeletion: PendingDeletion | null = null;
-    observationBuffer: Observation[] = [];
+    /** Per-session observation buffers — each agent/session gets isolated storage. */
+    sessionBuffers: Map<string, SessionBuffer> = new Map();
     resolvedProvider: ProviderInfo | null = null;
 
     // References
@@ -77,17 +78,57 @@ export class PluginState {
         return this.memories.filter((m) => getMemoryCategory(m) === "knowledge");
     }
 
-    // ---- Observer buffer ----
+    // ---- Observer buffers (per-session) ----
+
+    /** Read-only aggregate of ALL sessions' observations (for cross-session searches like guide matching). */
+    get observationBuffer(): Observation[] {
+        const all: Observation[] = [];
+        for (const buf of this.sessionBuffers.values()) {
+            all.push(...buf.observations);
+        }
+        return all;
+    }
 
     pushObservation(obs: Observation): void {
-        this.observationBuffer.push(obs);
-        if (this.observationBuffer.length > 50) {
-            this.observationBuffer.splice(0, this.observationBuffer.length - 50);
+        const sid = obs.sessionId || "default";
+        let buf = this.sessionBuffers.get(sid);
+        if (!buf) {
+            buf = { observations: [] };
+            this.sessionBuffers.set(sid, buf);
+        }
+        buf.observations.push(obs);
+        if (buf.observations.length > 50) {
+            buf.observations.splice(0, buf.observations.length - 50);
         }
     }
 
+    getSessionObservations(sessionId: string): Observation[] {
+        return this.sessionBuffers.get(sessionId)?.observations || [];
+    }
+
+    clearSessionObservations(sessionId: string): void {
+        const buf = this.sessionBuffers.get(sessionId);
+        if (buf) {
+            buf.observations.length = 0;
+        }
+    }
+
+    /** Clear ALL session buffers. */
     clearObservations(): void {
-        this.observationBuffer.length = 0;
+        this.sessionBuffers.clear();
+    }
+
+    setDelegationContext(sessionId: string, context: string): void {
+        let buf = this.sessionBuffers.get(sessionId);
+        if (!buf) {
+            buf = { observations: [] };
+            this.sessionBuffers.set(sessionId, buf);
+        }
+        buf.delegationContext = context;
+    }
+
+    getDelegationContext(sessionId: string): string | undefined {
+        return this.sessionBuffers.get(sessionId)?.delegationContext;
     }
 
     // ---- Logging (respects verbose flag) ----
