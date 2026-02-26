@@ -118,6 +118,71 @@ export async function getLLMStatus(s: PluginState): Promise<string> {
     return "No provider configured — using OpenCode's built-in AI";
 }
 
+/**
+ * Startup connectivity test — sends a simple "HI" to the LLM and validates
+ * that a non-empty response comes back. Logs success/failure with latency.
+ * Returns the result so callers can inspect it if needed.
+ */
+export async function testLLMConnection(s: PluginState): Promise<{
+    ok: boolean;
+    latencyMs: number;
+    provider?: string;
+    model?: string;
+    reply?: string;
+    error?: string;
+}> {
+    const provider = await resolveProvider(s);
+
+    if (!provider?.baseURL || !provider.apiKey) {
+        const msg = "No LLM provider configured — skipping connectivity test";
+        s.log(`[code-buddy] ⚠️ ${msg}`);
+        return { ok: false, latencyMs: 0, error: msg };
+    }
+
+    const startTime = Date.now();
+    try {
+        const response = await fetch(`${provider.baseURL}/chat/completions`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${provider.apiKey}`,
+                ...(provider.headers || {}),
+            },
+            body: JSON.stringify({
+                model: provider.modelID,
+                messages: [{ role: "user", content: "HI" }],
+                max_tokens: 10,
+                temperature: 0,
+            }),
+        });
+
+        const latencyMs = Date.now() - startTime;
+
+        if (!response.ok) {
+            const error = `HTTP ${response.status} ${response.statusText}`;
+            s.log(`[code-buddy] ❌ LLM connection test FAILED (${provider.name}/${provider.modelID}) — ${error} (${latencyMs}ms)`);
+            return { ok: false, latencyMs, provider: provider.name, model: provider.modelID, error };
+        }
+
+        const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
+        const reply = data.choices?.[0]?.message?.content?.trim() || "";
+
+        if (reply.length === 0) {
+            const error = "Empty response from LLM";
+            s.log(`[code-buddy] ❌ LLM connection test FAILED (${provider.name}/${provider.modelID}) — ${error} (${latencyMs}ms)`);
+            return { ok: false, latencyMs, provider: provider.name, model: provider.modelID, error };
+        }
+
+        s.log(`[code-buddy] ✅ LLM connection test OK (${provider.name}/${provider.modelID}) — "${reply.substring(0, 50)}" (${latencyMs}ms)`);
+        return { ok: true, latencyMs, provider: provider.name, model: provider.modelID, reply };
+    } catch (err: any) {
+        const latencyMs = Date.now() - startTime;
+        const error = err.message || String(err);
+        s.log(`[code-buddy] ❌ LLM connection test FAILED (${provider.name}/${provider.modelID}) — ${error} (${latencyMs}ms)`);
+        return { ok: false, latencyMs, provider: provider.name, model: provider.modelID, error };
+    }
+}
+
 // ============================================
 // AI Calls
 // ============================================
