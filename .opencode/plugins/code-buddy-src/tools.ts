@@ -225,6 +225,11 @@ export function createTools(s: PluginState) {
 | \`buddy_analyze_code(code)\` | AI code analysis |
 | \`buddy_suggest_improvements(context)\` | AI improvement suggestions |
 
+## 📋 Diagnostics
+| Command | Description |
+|---------|-------------|
+| \`buddy_logs(lines, filter, level)\` | View recent plugin log entries |
+
 ---
 📴 Core features work **offline**. AI features use OpenCode's current LLM.`;
             },
@@ -801,6 +806,48 @@ ${warnings.length > 0 ? `### ⚠️ Warnings\n${warnings.join("\n")}` : ""}`;
                 const response = await askAI(s, `Based on this context, suggest improvements for ${type}:\n\n${args.context}${memCtx}\n\nProvide actionable, specific suggestions.`);
 
                 return `## 💡 Improvement Suggestions (${type})\n\n### Context\n${args.context}\n\n### Suggestions\n${response}`;
+            },
+        }),
+
+        // ========================================
+        // LOGS
+        // ========================================
+
+        buddy_logs: tool({
+            description: "View recent plugin log entries. Useful for debugging auto-detected errors and inspecting plugin behavior.",
+            args: {
+                lines: tool.schema.number().optional().describe("Number of recent log lines to show (default: 50)"),
+                filter: tool.schema.string().optional().describe("Filter pattern (regex) to search logs — e.g. 'error', 'flush', 'dedup'"),
+                level: tool.schema.string().optional().describe("Filter by level: 'error' (errors/warnings only), 'all' (default)"),
+            },
+            async execute(args: any) {
+                const limit = args.lines || 50;
+                let entries: string[];
+
+                if (args.filter) {
+                    entries = s.searchLogs(args.filter, limit);
+                } else {
+                    entries = s.readLogs(limit);
+                }
+
+                if (args.level === "error") {
+                    entries = entries.filter((l) =>
+                        /\b(error|Error|ERROR|❌|⚠️|failed|FAILED|exception|warn|WARN)\b/.test(l),
+                    );
+                }
+
+                if (entries.length === 0) {
+                    return `📋 No log entries found${args.filter ? ` matching "${args.filter}"` : ""}.\n\nLog file: \`${s.getLogFilePath()}\``;
+                }
+
+                let output = `## 📋 Plugin Logs`;
+                if (args.filter) output += ` (filter: "${args.filter}")`;
+                if (args.level === "error") output += ` (errors only)`;
+                output += `\n\n**Showing**: ${entries.length} entr${entries.length === 1 ? "y" : "ies"}\n**Log file**: \`${s.getLogFilePath()}\`\n\n\`\`\`\n`;
+                output += entries.join("\n");
+                output += `\n\`\`\``;
+
+                return output;
             },
         }),
     };
