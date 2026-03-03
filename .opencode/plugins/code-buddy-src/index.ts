@@ -10,7 +10,7 @@ import * as os from "node:os";
 import { LocalStorage } from "./storage";
 import { loadConfig } from "./config";
 import { PluginState } from "./state";
-import { getLLMStatus } from "./llm";
+import { getLLMStatus, testLLMConnection } from "./llm";
 import { createTools } from "./tools";
 import { createHooks } from "./hooks";
 
@@ -33,10 +33,11 @@ export const CodeBuddyPlugin: Plugin = async (ctx) => {
         return { tool: { buddy_config: allTools.buddy_config } };
     }
 
-    // Log initial status (non-blocking, respects verbose)
+    // Non-blocking startup: log status then test LLM connectivity
     getLLMStatus(state).then((status) =>
         state.log(`[code-buddy] Plugin initialized - LLM: ${status}`),
     );
+    testLLMConnection(state).catch(() => { /* logged internally */ });
 
     return {
         tool: createTools(state),

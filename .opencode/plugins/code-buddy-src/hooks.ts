@@ -31,45 +31,101 @@ function isWriteTool(toolName: string): boolean {
     return WRITE_TOOL_PATTERNS.some((p) => lower.includes(p));
 }
 
+/** Safely serialize a value — handles circular references and Error objects. */
+function safeStringify(v: unknown, maxLen = 200): string {
+    if (typeof v === "string") return v.substring(0, maxLen);
+    if (v instanceof Error) return `${v.name}: ${v.message}`.substring(0, maxLen);
+    try { return JSON.stringify(v).substring(0, maxLen); } catch { return String(v).substring(0, maxLen); }
+}
+
+// ============================================
+// Session ID extraction for multi-agent support
+// ============================================
+
+/** Tool name patterns that indicate an orchestrator delegating to a subagent. */
+const DELEGATION_PATTERNS = ["task", "subagent", "delegate", "spawn", "agent"];
+
+/**
+ * Best-effort extraction of session/agent ID from hook parameters.
+ * Falls back to "default" for single-agent sessions.
+ */
+function extractSessionId(...sources: (Record<string, unknown> | undefined | null)[]): string {
+    for (const source of sources) {
+        if (!source) continue;
+        const id = source.sessionId || source.session_id || source.agentId || source.agent_id;
+        if (typeof id === "string" && id.length > 0) return id;
+    }
+    return "default";
+}
+
+/** Returns true if the tool name looks like an orchestrator delegation call. */
+function isDelegationTool(toolName: string): boolean {
+    const lower = toolName.toLowerCase();
+    return DELEGATION_PATTERNS.some((p) => lower.includes(p));
+}
+
 // ============================================
 // Factory — returns all hook handlers
 // ============================================
 
 export function createHooks(s: PluginState) {
-    // Track flush state: "idle" → "started" → "completed"
-    let flushState: "idle" | "started" | "completed" = "idle";
-    // Track whether we've injected relevant guides yet this session
-    let guidesInjected = false;
-    let guideMatchAttempts = 0;
+    // ---- Per-session state (isolated across agents/subagents) ----
+    type FlushState = "idle" | "started" | "completed";
+    const sessionFlushState = new Map<string, FlushState>();
+    const sessionGuidesInjected = new Map<string, boolean>();
+    const sessionGuideAttempts = new Map<string, number>();
     const MAX_GUIDE_MATCH_ATTEMPTS = 3;
 
-    const flushObservations = async (reason: string) => {
-        if (flushState !== "idle" || s.observationBuffer.length === 0) return;
-        flushState = "started";
-        s.log(`[code-buddy] 📤 Flushing observations (${reason}, ${s.observationBuffer.length} buffered)`);
+    /** Last delegation context captured from orchestrator — assigned to next new session. */
+    let pendingDelegationContext: string | undefined;
+
+    const getFlushState = (sid: string): FlushState => sessionFlushState.get(sid) || "idle";
+
+    /**
+     * Flush observations for a single session. Each session is independently
+     * snapshotted, processed, and cleaned up — parallel subagent flushes
+     * never interfere with each other.
+     */
+    const flushSessionObservations = async (sessionId: string, reason: string) => {
+        if (getFlushState(sessionId) !== "idle") return;
+        const observations = s.getSessionObservations(sessionId);
+        if (observations.length === 0) return;
+
+        sessionFlushState.set(sessionId, "started");
+        // Snapshot and clear this session's buffer only
+        const snapshot = [...observations];
+        s.clearSessionObservations(sessionId);
+        // Reset guide state for this session's next cycle
+        sessionGuidesInjected.delete(sessionId);
+        sessionGuideAttempts.delete(sessionId);
+
+        const delegationCtx = s.getDelegationContext(sessionId);
+        s.log(`[code-buddy] 📤 Flushing session ${sessionId} (${reason}, ${snapshot.length} buffered${delegationCtx ? ", has delegation context" : ""})`);
+
         try {
-            await handleSessionIdle(s);
-            flushState = "completed";
-            s.log(`[code-buddy] ✅ Async flush completed (${reason})`);
+            await handleSessionIdle(s, snapshot, delegationCtx);
+            sessionFlushState.set(sessionId, "completed");
+            s.log(`[code-buddy] ✅ Async flush completed for session ${sessionId} (${reason})`);
         } catch (err) {
-            s.log(`[code-buddy] ❌ Async flush failed (${reason}):`, err);
-            // Fall back to sync save so we don't lose data
-            try { flushObservationsSync(s); } catch { /* best effort */ }
-            flushState = "completed";
+            s.log(`[code-buddy] ❌ Async flush failed for session ${sessionId} (${reason}):`, err);
+            // Restore snapshot for sync fallback
+            for (const obs of snapshot) s.pushObservation(obs);
+            try { flushSessionObservationsSync(s, sessionId); } catch { /* best effort */ }
+            sessionFlushState.set(sessionId, "completed");
         }
     };
 
-    // Safety net: flush on process exit (covers `opencode run` where
-    // session.idle async work may not complete before process terminates)
+    // Safety net: flush ALL sessions on process exit
     const onExit = () => {
-        if (flushState === "completed") return; // async flush finished — nothing to do
-        if (s.observationBuffer.length < s.config.hooks.observeMinActions) return;
-
-        s.log(`[code-buddy] 📤 Process exiting (flushState=${flushState}) — sync saving ${s.observationBuffer.length} observations`);
-        try {
-            flushObservationsSync(s);
-        } catch (err) {
-            s.log("[code-buddy] Sync flush error:", err);
+        for (const [sessionId, buf] of s.sessionBuffers) {
+            if (getFlushState(sessionId) === "completed") continue;
+            if (buf.observations.length < s.config.hooks.observeMinActions) continue;
+            s.log(`[code-buddy] 📤 Process exiting — sync saving session ${sessionId} (${buf.observations.length} observations)`);
+            try {
+                flushSessionObservationsSync(s, sessionId);
+            } catch (err) {
+                s.log(`[code-buddy] Sync flush error (session ${sessionId}):`, err);
+            }
         }
     };
     process.on("beforeExit", onExit);
@@ -78,13 +134,14 @@ export function createHooks(s: PluginState) {
     return {
         // ---- event: session lifecycle ----
         event: async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
-            if (event.type === "session.idle") {
-                flushState = "idle"; // reset for next idle cycle
-                await flushObservations("session.idle");
-            }
-            // Also flush when session ends (covers `opencode run`)
-            if (event.type === "session.deleted") {
-                await flushObservations("session.deleted");
+            const sessionId = extractSessionId(event.properties);
+
+            if (event.type === "session.idle" || event.type === "session.deleted") {
+                // Only reset flushState when no flush is in progress for THIS session
+                if (getFlushState(sessionId) !== "started") {
+                    sessionFlushState.set(sessionId, "idle");
+                }
+                await flushSessionObservations(sessionId, event.type);
             }
         },
 
@@ -109,13 +166,40 @@ export function createHooks(s: PluginState) {
             const ignoreList = s.config.hooks.observeIgnoreTools || [];
             if (input.tool.startsWith("buddy_") || ignoreList.includes(input.tool)) return;
 
+            const meta = output.metadata || {};
+            const inputArgs = input.args || {};
+            const sessionId = extractSessionId(meta, inputArgs);
+
+            // ---- Delegation detection: capture orchestrator's intent ----
+            if (isDelegationTool(input.tool)) {
+                const delegationPrompt = String(inputArgs.prompt || inputArgs.description || inputArgs.message || "");
+                if (delegationPrompt) {
+                    // Try to associate with the spawned session directly
+                    const targetSession = extractSessionId(meta);
+                    if (targetSession !== "default") {
+                        s.setDelegationContext(targetSession, delegationPrompt);
+                        s.log(`[code-buddy] 📋 Captured delegation context for session ${targetSession}`);
+                    } else {
+                        // Store as pending — will be associated with next new session
+                        pendingDelegationContext = delegationPrompt;
+                        s.log(`[code-buddy] 📋 Captured pending delegation context (${delegationPrompt.substring(0, 60)}...)`);
+                    }
+                }
+                // Don't observe the delegation tool call itself — it has no code content
+                return;
+            }
+
+            // ---- Associate pending delegation context with new sessions ----
+            if (pendingDelegationContext && sessionId !== "default" && !s.getDelegationContext(sessionId)) {
+                s.setDelegationContext(sessionId, pendingDelegationContext);
+                s.log(`[code-buddy] 📋 Associated pending delegation context with session ${sessionId}`);
+                pendingDelegationContext = undefined;
+            }
+
             const outputStr = typeof output.output === "string" ? output.output : "";
 
             const errorPatterns = /\b(error|Error|ERROR|failed|FAILED|FAIL|exception|Exception|panic|fatal|Fatal|ENOENT|EACCES|TypeError|ReferenceError|SyntaxError)\b/;
             const hasError = s.config.hooks.autoErrorDetect && errorPatterns.test(outputStr);
-
-            const meta = output.metadata || {};
-            const inputArgs = input.args || {};
 
             // Extract file path from multiple sources (metadata, input args, title)
             let fileEdited = (meta.filePath || meta.path || meta.file
@@ -134,6 +218,7 @@ export function createHooks(s: PluginState) {
 
             s.pushObservation({
                 timestamp: nowTimestamp(),
+                sessionId,
                 tool: input.tool,
                 args: { ...meta, ...inputArgs },
                 result: outputStr.substring(0, resultLimit),
@@ -142,19 +227,16 @@ export function createHooks(s: PluginState) {
                 isWriteAction,
             });
 
-            s.log(`[code-buddy] 👁️ Observed: ${input.tool}${fileEdited ? ` → ${fileEdited}` : ""}${isWriteAction ? " [write]" : ""} (title: ${output.title || "none"})`);
+            s.log(`[code-buddy] 👁️ Observed [${sessionId}]: ${input.tool}${fileEdited ? ` → ${fileEdited}` : ""}${isWriteAction ? " [write]" : ""} (title: ${output.title || "none"})`);
 
             // Inject relevant project guides on actual file writes/edits.
-            // Only trigger when fileEdited is set (write/edit tools) — NOT bash commands
-            // like `ls -la` which have no meaningful content for guide matching.
-            // Only trigger on code files — docs (.md, .txt) and config (.json, .yaml) have
-            // poor search context and would match wrong guides before the real code file.
-            // Retry up to MAX_GUIDE_MATCH_ATTEMPTS times — the first code write may be a
-            // config file with poor context, so allow later, more informative writes to match.
+            // Per-session tracking: each agent gets independent guide injection.
             const fileExt = fileEdited?.split(".").pop()?.toLowerCase() || "";
             const isCodeFile = ["html", "js", "ts", "jsx", "tsx", "css", "scss", "py", "go", "rs", "java", "cpp", "c", "rb", "php", "svelte", "vue"].includes(fileExt);
-            if (!guidesInjected && fileEdited && isCodeFile && s.memories.length > 0 && guideMatchAttempts < MAX_GUIDE_MATCH_ATTEMPTS) {
-                guideMatchAttempts++;
+            const guidesInjected = sessionGuidesInjected.get(sessionId) || false;
+            const guideAttempts = sessionGuideAttempts.get(sessionId) || 0;
+            if (!guidesInjected && fileEdited && isCodeFile && s.memories.length > 0 && guideAttempts < MAX_GUIDE_MATCH_ATTEMPTS) {
+                sessionGuideAttempts.set(sessionId, guideAttempts + 1);
 
                 // Build intent-based search context — match on WHAT the project does,
                 // not implementation-level function names.
@@ -182,7 +264,7 @@ export function createHooks(s: PluginState) {
                 }
 
                 const searchCtx = searchParts.join(" ");
-                s.log(`[code-buddy] 📚 Searching ${s.memories.length} memories for guides (attempt ${guideMatchAttempts}/${MAX_GUIDE_MATCH_ATTEMPTS}, context: "${searchCtx.substring(0, 80)}")`);
+                s.log(`[code-buddy] 📚 Searching ${s.memories.length} memories for guides [${sessionId}] (attempt ${guideAttempts + 1}/${MAX_GUIDE_MATCH_ATTEMPTS}, context: "${searchCtx.substring(0, 80)}")`);
 
                 // Use overlap coefficient for guide discovery — handles asymmetric lengths
                 // (short search query vs long memory content) much better than Jaccard.
@@ -199,7 +281,7 @@ export function createHooks(s: PluginState) {
                 s.log(`[code-buddy] 📚 Found ${guides.length} matching guide(s)`);
 
                 if (guides.length > 0) {
-                    guidesInjected = true;
+                    sessionGuidesInjected.set(sessionId, true);
                     let guideBlock = "\n\n---\n📚 **Relevant project guides from memory:**\n";
                     for (const g of guides) {
                         guideBlock += `\n### ${g.title}\n${g.content.substring(0, 800)}\n`;
@@ -252,7 +334,7 @@ export function createHooks(s: PluginState) {
 // Internal handlers
 // ============================================
 
-async function handleSessionIdle(s: PluginState): Promise<void> {
+async function handleSessionIdle(s: PluginState, buf: Observation[], delegationContext?: string): Promise<void> {
     s.session.lastActivity = Date.now();
 
     // Reminder (only when NOT in fullAuto mode)
@@ -260,32 +342,30 @@ async function handleSessionIdle(s: PluginState): Promise<void> {
         s.log(`[code-buddy] 💡 Reminder: ${s.session.tasksCompleted} task(s) completed. Use buddy_done to record results.`);
     }
 
-    // Auto-observer
-    if (!s.config.hooks.autoObserve || s.observationBuffer.length < s.config.hooks.observeMinActions) return;
+    // Auto-observer — operates on the snapshot passed in, not s.observationBuffer,
+    // so concurrent subagent observations don't corrupt the in-flight processing.
+    if (!s.config.hooks.autoObserve || buf.length < s.config.hooks.observeMinActions) return;
 
     // Action-type filter: skip recording for read-only sessions (unless errors detected)
     if (s.config.hooks.requireEditForRecord) {
-        const hasWriteAction = s.observationBuffer.some((o) => o.isWriteAction);
-        const hasErrors = s.observationBuffer.some((o) => o.hasError);
+        const hasWriteAction = buf.some((o) => o.isWriteAction);
+        const hasErrors = buf.some((o) => o.hasError);
 
         if (!hasWriteAction && !hasErrors) {
             s.log("[code-buddy] 📖 Read-only session detected, skipping auto-record");
-            s.clearObservations();
             return;
         }
     }
 
     try {
         if (s.config.hooks.fullAuto) {
-            await processFullAutoObserver(s);
+            await processFullAutoObserver(s, buf, delegationContext);
         } else {
-            await processSingleSummaryObserver(s);
+            await processSingleSummaryObserver(s, buf, delegationContext);
         }
     } catch (err) {
         s.log("[code-buddy] Observer error:", err);
     }
-
-    s.clearObservations();
 }
 
 // ---- Shared types for auto-observer entries ----
@@ -623,21 +703,25 @@ function buildFallbackEntries(
 
 // ---- Full Auto: produce multiple categorised entries ----
 
-async function processFullAutoObserver(s: PluginState): Promise<void> {
-    const buf = s.observationBuffer;
+async function processFullAutoObserver(s: PluginState, buf: Observation[], delegationContext?: string): Promise<void> {
     const hasErrors = buf.some((o) => o.hasError);
     const editedFiles = [...new Set(buf.filter((o) => o.fileEdited).map((o) => o.fileEdited as string))];
 
     const observationSummary = buf.map((o) => {
         const time = formatTime(o.timestamp);
         const argsStr = o.args
-            ? ` (${Object.entries(o.args).map(([k, v]) => `${k}: ${typeof v === "string" ? v.substring(0, 200) : JSON.stringify(v).substring(0, 200)}`).join(", ")})`
+            ? ` (${Object.entries(o.args).map(([k, v]) => `${k}: ${safeStringify(v)}`).join(", ")})`
             : "";
         return `[${time}] ${o.tool}${argsStr}${o.result ? `\n  → ${o.result}` : ""}${o.hasError ? " ❌ ERROR" : ""}`;
     }).join("\n");
 
-    const prompt = `You are a knowledge extraction AI. Your job is to capture the **understanding** someone needs to continue working on this project — not an inventory of files/functions, but the mental model, decisions, gotchas, and conventions.
+    // Delegation context tells the AI classifier WHY this work was done
+    const delegationBlock = delegationContext
+        ? `\n📋 **Orchestrator's task for this agent:**\n${delegationContext.substring(0, 500)}\n`
+        : "";
 
+    const prompt = `You are a knowledge extraction AI. Your job is to capture the **understanding** someone needs to continue working on this project — not an inventory of files/functions, but the mental model, decisions, gotchas, and conventions.
+${delegationBlock}
 Observations:
 ${observationSummary}
 ${hasErrors ? "\n⚠️ Some observations contain errors." : ""}
@@ -735,19 +819,23 @@ Respond ONLY with valid JSON:
 
 // ---- Single summary mode ----
 
-async function processSingleSummaryObserver(s: PluginState): Promise<void> {
-    const buf = s.observationBuffer;
+async function processSingleSummaryObserver(s: PluginState, buf: Observation[], delegationContext?: string): Promise<void> {
 
     const observationSummary = buf.map((o) => {
         const time = formatTime(o.timestamp);
         const argsStr = o.args
-            ? ` (${Object.entries(o.args).map(([k, v]) => `${k}: ${typeof v === "string" ? v.substring(0, 200) : JSON.stringify(v).substring(0, 200)}`).join(", ")})`
+            ? ` (${Object.entries(o.args).map(([k, v]) => `${k}: ${safeStringify(v)}`).join(", ")})`
             : "";
         return `[${time}] ${o.tool}${argsStr}${o.result ? `\n  → ${o.result}` : ""}${o.hasError ? " ❌ ERROR" : ""}`;
     }).join("\n");
 
-    const prompt = `You are a knowledge extraction AI. Capture the **understanding** a future developer needs to continue this project — the mental model, not an inventory.
+    // Delegation context tells the AI classifier WHY this work was done
+    const delegationBlock = delegationContext
+        ? `\n📋 **Orchestrator's task for this agent:**\n${delegationContext.substring(0, 500)}\n`
+        : "";
 
+    const prompt = `You are a knowledge extraction AI. Capture the **understanding** a future developer needs to continue this project — the mental model, not an inventory.
+${delegationBlock}
 Observations:
 ${observationSummary}
 
@@ -804,14 +892,22 @@ Respond ONLY with valid JSON:
 // ---- Synchronous fallback flush for process exit ----
 
 /**
- * Synchronous best-effort flush using rule-based classification only (no AI).
+ * Synchronous best-effort flush for a specific session.
  * Used in process exit handlers where async operations cannot complete.
+ */
+function flushSessionObservationsSync(s: PluginState, sessionId: string): void {
+    const buf = [...s.getSessionObservations(sessionId)];
+    s.clearSessionObservations(sessionId);
+    flushObservationBufSync(s, buf);
+}
+
+/**
+ * Synchronous best-effort flush using rule-based classification only (no AI).
  *
  * Reads created/edited files from disk to extract a structured project guide
  * that can help an AI agent recreate or extend the project later.
  */
-function flushObservationsSync(s: PluginState): void {
-    const buf = s.observationBuffer;
+function flushObservationBufSync(s: PluginState, buf: Observation[]): void {
     if (buf.length < s.config.hooks.observeMinActions) return;
 
     // Check requireEditForRecord gate
