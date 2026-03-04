@@ -175,13 +175,16 @@ export function createHooks(s: PluginState) {
                 }
                 guideBlock += "\n---";
 
+                // Get messageID from existing parts to avoid FK constraint violation
+                const existingMessageID = output.parts.find((p) => p.messageID)?.messageID as string | undefined;
+
                 // Append guide as a new text part in the user's message
                 output.parts.push({
                     type: "text",
                     text: guideBlock,
                     id: `guide_${sessionId}_${Date.now()}`,
                     sessionID: input.sessionID,
-                    messageID: "",
+                    ...(existingMessageID ? { messageID: existingMessageID } : {}),
                     synthetic: true,
                 });
 
