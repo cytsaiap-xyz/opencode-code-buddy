@@ -1,8 +1,9 @@
 /**
  * All event hooks for Code Buddy:
+ *  - chat.message (early guide injection on user prompt)
  *  - event (file.edited, session.idle)
  *  - tool.execute.before (env protection)
- *  - tool.execute.after (observer buffer + early guide injection)
+ *  - tool.execute.after (observer buffer + fallback guide injection)
  *  - experimental.session.compacting (context injection)
  */
 
@@ -132,6 +133,64 @@ export function createHooks(s: PluginState) {
     process.on("exit", onExit);
 
     return {
+        // ---- chat.message: inject relevant guides into user prompt ----
+        // This fires when the user sends a message, BEFORE the agent starts thinking.
+        // Perfect for plan mode and any scenario — the agent receives experience upfront.
+        "chat.message": async (
+            input: { sessionID: string; agent?: string },
+            output: { message: { role: string; system?: string }; parts: Array<{ type: string; text?: string; [key: string]: unknown }> },
+        ) => {
+            if (!s.config.hooks.autoObserve || s.memories.length === 0) return;
+
+            const sessionId = input.sessionID || "default";
+            if (sessionGuidesInjected.get(sessionId)) return;
+
+            // Extract user's message text from parts
+            const userText = output.parts
+                .filter((p) => p.type === "text" && p.text)
+                .map((p) => p.text!)
+                .join(" ");
+
+            if (userText.length < 5) return;
+
+            s.log(`[code-buddy] 📚 chat.message: matching user prompt against ${s.memories.length} memories [${sessionId}] ("${userText.substring(0, 80)}")`);
+
+            const guides = s.memories
+                .map((m) => ({
+                    memory: m,
+                    score: calculateGuideRelevance(userText, `${m.title} ${m.content}`),
+                }))
+                .filter((r) => r.score >= 0.15)
+                .sort((a, b) => b.score - a.score)
+                .slice(0, 2)
+                .map((r) => r.memory);
+
+            if (guides.length > 0) {
+                sessionGuidesInjected.set(sessionId, true);
+
+                let guideBlock = "\n\n---\n📚 **Relevant project guides from memory:**\n";
+                guideBlock += "**Review these before planning or writing code — they contain experience from previous sessions.**\n";
+                for (const g of guides) {
+                    guideBlock += `\n### ${g.title}\n${g.content.substring(0, 800)}\n`;
+                }
+                guideBlock += "\n---";
+
+                // Append guide as a new text part in the user's message
+                output.parts.push({
+                    type: "text",
+                    text: guideBlock,
+                    id: `guide_${sessionId}_${Date.now()}`,
+                    sessionID: input.sessionID,
+                    messageID: "",
+                    synthetic: true,
+                });
+
+                s.log(`[code-buddy] 📚 Injected ${guides.length} guide(s) into user prompt [${sessionId}]`);
+            } else {
+                s.log(`[code-buddy] 📚 No matching guides found for user prompt [${sessionId}]`);
+            }
+        },
+
         // ---- event: session lifecycle ----
         event: async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
             const sessionId = extractSessionId(event.properties);
@@ -229,10 +288,10 @@ export function createHooks(s: PluginState) {
 
             s.log(`[code-buddy] 👁️ Observed [${sessionId}]: ${input.tool}${fileEdited ? ` → ${fileEdited}` : ""}${isWriteAction ? " [write]" : ""} (title: ${output.title || "none"})`);
 
-            // ---- Early guide injection: match user request against memories ----
-            // Inject guides as early as possible — on ANY tool call, not just code edits.
-            // This gives the agent experience/context BEFORE it starts writing code,
-            // so it can plan and build with knowledge from previous sessions.
+            // ---- Fallback guide injection via tool output ----
+            // Primary injection happens in chat.message (on user prompt).
+            // This fallback catches cases where chat.message didn't find matches
+            // but tool context (file paths, search patterns, output content) reveals relevance.
             const fileExt = fileEdited?.split(".").pop()?.toLowerCase() || "";
             const isCodeFile = ["html", "js", "ts", "jsx", "tsx", "css", "scss", "py", "go", "rs", "java", "cpp", "c", "rb", "php", "svelte", "vue"].includes(fileExt);
             const guidesInjected = sessionGuidesInjected.get(sessionId) || false;
