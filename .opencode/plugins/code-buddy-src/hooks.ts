@@ -1,8 +1,9 @@
 /**
  * All event hooks for Code Buddy:
+ *  - chat.message (early guide injection on user prompt)
  *  - event (file.edited, session.idle)
  *  - tool.execute.before (env protection)
- *  - tool.execute.after (observer buffer)
+ *  - tool.execute.after (observer buffer + fallback guide injection)
  *  - experimental.session.compacting (context injection)
  */
 
@@ -132,6 +133,64 @@ export function createHooks(s: PluginState) {
     process.on("exit", onExit);
 
     return {
+        // ---- chat.message: inject relevant guides into user prompt ----
+        // This fires when the user sends a message, BEFORE the agent starts thinking.
+        // Perfect for plan mode and any scenario — the agent receives experience upfront.
+        "chat.message": async (
+            input: { sessionID: string; agent?: string },
+            output: { message: { role: string; system?: string }; parts: Array<{ type: string; text?: string; [key: string]: unknown }> },
+        ) => {
+            if (!s.config.hooks.autoObserve || s.memories.length === 0) return;
+
+            const sessionId = input.sessionID || "default";
+            if (sessionGuidesInjected.get(sessionId)) return;
+
+            // Extract user's message text from parts
+            const userText = output.parts
+                .filter((p) => p.type === "text" && p.text)
+                .map((p) => p.text!)
+                .join(" ");
+
+            if (userText.length < 5) return;
+
+            s.log(`[code-buddy] 📚 chat.message: matching user prompt against ${s.memories.length} memories [${sessionId}] ("${userText.substring(0, 80)}")`);
+
+            const guides = s.memories
+                .map((m) => ({
+                    memory: m,
+                    score: calculateGuideRelevance(userText, `${m.title} ${m.content}`),
+                }))
+                .filter((r) => r.score >= 0.15)
+                .sort((a, b) => b.score - a.score)
+                .slice(0, 2)
+                .map((r) => r.memory);
+
+            if (guides.length > 0) {
+                sessionGuidesInjected.set(sessionId, true);
+
+                let guideBlock = "\n\n---\n📚 **Relevant project guides from memory:**\n";
+                guideBlock += "**Review these before planning or writing code — they contain experience from previous sessions.**\n";
+                for (const g of guides) {
+                    guideBlock += `\n### ${g.title}\n${g.content.substring(0, 800)}\n`;
+                }
+                guideBlock += "\n---";
+
+                // Append guide as a new text part in the user's message
+                output.parts.push({
+                    type: "text",
+                    text: guideBlock,
+                    id: `guide_${sessionId}_${Date.now()}`,
+                    sessionID: input.sessionID,
+                    messageID: "",
+                    synthetic: true,
+                });
+
+                s.log(`[code-buddy] 📚 Injected ${guides.length} guide(s) into user prompt [${sessionId}]`);
+            } else {
+                s.log(`[code-buddy] 📚 No matching guides found for user prompt [${sessionId}]`);
+            }
+        },
+
         // ---- event: session lifecycle ----
         event: async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
             const sessionId = extractSessionId(event.properties);
@@ -229,66 +288,95 @@ export function createHooks(s: PluginState) {
 
             s.log(`[code-buddy] 👁️ Observed [${sessionId}]: ${input.tool}${fileEdited ? ` → ${fileEdited}` : ""}${isWriteAction ? " [write]" : ""} (title: ${output.title || "none"})`);
 
-            // Inject relevant project guides on actual file writes/edits.
-            // Per-session tracking: each agent gets independent guide injection.
+            // ---- Fallback guide injection via tool output ----
+            // Primary injection happens in chat.message (on user prompt).
+            // This fallback catches cases where chat.message didn't find matches
+            // but tool context (file paths, search patterns, output content) reveals relevance.
             const fileExt = fileEdited?.split(".").pop()?.toLowerCase() || "";
             const isCodeFile = ["html", "js", "ts", "jsx", "tsx", "css", "scss", "py", "go", "rs", "java", "cpp", "c", "rb", "php", "svelte", "vue"].includes(fileExt);
             const guidesInjected = sessionGuidesInjected.get(sessionId) || false;
             const guideAttempts = sessionGuideAttempts.get(sessionId) || 0;
-            if (!guidesInjected && fileEdited && isCodeFile && s.memories.length > 0 && guideAttempts < MAX_GUIDE_MATCH_ATTEMPTS) {
+            if (!guidesInjected && s.memories.length > 0 && guideAttempts < MAX_GUIDE_MATCH_ATTEMPTS) {
                 sessionGuideAttempts.set(sessionId, guideAttempts + 1);
 
-                // Build intent-based search context — match on WHAT the project does,
-                // not implementation-level function names.
-                const fileContent = String(inputArgs.content || "");
+                // Build search context from ALL available signals — user intent flows
+                // through tool args, output titles, delegation context, and file content.
                 const searchParts: string[] = [];
 
-                // 1. SPEC.md content — the user's actual requirements (best signal)
+                // 1. Delegation context — orchestrator's task description (strongest signal of user intent)
+                const delegCtx = s.getDelegationContext(sessionId);
+                if (delegCtx) searchParts.push(delegCtx.substring(0, 300));
+
+                // 2. SPEC.md content — the user's actual requirements
                 const specContent = extractSpecContent(s.observationBuffer);
                 if (specContent) searchParts.push(specContent);
 
-                // 2. Domain keywords — conceptual nouns from identifiers and HTML text
-                const domainKw = extractDomainKeywords(fileContent);
-                if (domainKw.length > 0) searchParts.push(domainKw.join(" "));
+                // 3. Tool output title — often describes the action (e.g. "Read index.html", "Search for auth")
+                if (output.title) searchParts.push(output.title);
 
-                // 3. HTML <title> — project identity
-                const titleMatch = fileContent.match(/<title>(.+?)<\/title>/i);
-                if (titleMatch) searchParts.push(titleMatch[1]);
+                // 4. Tool-specific context from args (file paths, search patterns, commands)
+                const filePath = String(inputArgs.filePath || inputArgs.file_path || inputArgs.path || "");
+                if (filePath) searchParts.push(filePath);
 
-                // 4. Function names — last-resort fallback only when nothing else available
+                const searchPattern = String(inputArgs.pattern || inputArgs.query || "");
+                if (searchPattern) searchParts.push(searchPattern);
+
+                const command = String(inputArgs.command || "");
+                if (command) searchParts.push(command.split("&&")[0].trim().substring(0, 100));
+
+                // 5. For code file edits — domain keywords from file content
+                if (fileEdited && isCodeFile) {
+                    const fileContent = String(inputArgs.content || "");
+                    const domainKw = extractDomainKeywords(fileContent);
+                    if (domainKw.length > 0) searchParts.push(domainKw.join(" "));
+
+                    const htmlTitle = fileContent.match(/<title>(.+?)<\/title>/i);
+                    if (htmlTitle) searchParts.push(htmlTitle[1]);
+                }
+
+                // 6. Output content — for Read/Grep tools, contains file content being analyzed.
+                //    This captures context from files the agent reads BEFORE writing code.
+                if (!fileEdited && outputStr.length > 20) {
+                    searchParts.push(outputStr.substring(0, 400));
+                }
+
+                // 7. Fallback: function names from written file content
                 if (searchParts.length === 0) {
                     if (fileEdited) searchParts.push(fileEdited.split("/").pop() || "");
+                    const fileContent = String(inputArgs.content || "");
                     const funcNames = fileContent.match(/function\s+(\w+)/g);
                     if (funcNames) searchParts.push(...funcNames.slice(0, 8).map((f) => f.replace("function ", "")));
-                    if (output.title) searchParts.push(output.title);
                 }
 
                 const searchCtx = searchParts.join(" ");
-                s.log(`[code-buddy] 📚 Searching ${s.memories.length} memories for guides [${sessionId}] (attempt ${guideAttempts + 1}/${MAX_GUIDE_MATCH_ATTEMPTS}, context: "${searchCtx.substring(0, 80)}")`);
+                if (searchCtx.length > 5) {
+                    s.log(`[code-buddy] 📚 Searching ${s.memories.length} memories for guides [${sessionId}] (attempt ${guideAttempts + 1}/${MAX_GUIDE_MATCH_ATTEMPTS}, context: "${searchCtx.substring(0, 100)}")`);
 
-                // Use overlap coefficient for guide discovery — handles asymmetric lengths
-                // (short search query vs long memory content) much better than Jaccard.
-                const guides = s.memories
-                    .map((m) => ({
-                        memory: m,
-                        score: calculateGuideRelevance(searchCtx, `${m.title} ${m.content}`),
-                    }))
-                    .filter((r) => r.score >= 0.15)
-                    .sort((a, b) => b.score - a.score)
-                    .slice(0, 2)
-                    .map((r) => r.memory);
+                    // Use overlap coefficient for guide discovery — handles asymmetric lengths
+                    // (short search query vs long memory content) much better than Jaccard.
+                    const guides = s.memories
+                        .map((m) => ({
+                            memory: m,
+                            score: calculateGuideRelevance(searchCtx, `${m.title} ${m.content}`),
+                        }))
+                        .filter((r) => r.score >= 0.15)
+                        .sort((a, b) => b.score - a.score)
+                        .slice(0, 2)
+                        .map((r) => r.memory);
 
-                s.log(`[code-buddy] 📚 Found ${guides.length} matching guide(s)`);
+                    s.log(`[code-buddy] 📚 Found ${guides.length} matching guide(s)`);
 
-                if (guides.length > 0) {
-                    sessionGuidesInjected.set(sessionId, true);
-                    let guideBlock = "\n\n---\n📚 **Relevant project guides from memory:**\n";
-                    for (const g of guides) {
-                        guideBlock += `\n### ${g.title}\n${g.content.substring(0, 800)}\n`;
+                    if (guides.length > 0) {
+                        sessionGuidesInjected.set(sessionId, true);
+                        let guideBlock = "\n\n---\n📚 **Relevant project guides from memory:**\n";
+                        guideBlock += "**Review these before planning or writing code — they contain experience from previous sessions.**\n";
+                        for (const g of guides) {
+                            guideBlock += `\n### ${g.title}\n${g.content.substring(0, 800)}\n`;
+                        }
+                        guideBlock += "\n---";
+                        output.output += guideBlock;
+                        s.log(`[code-buddy] 📚 Injected ${guides.length} relevant guide(s) into tool output`);
                     }
-                    guideBlock += "\n---";
-                    output.output += guideBlock;
-                    s.log(`[code-buddy] 📚 Injected ${guides.length} relevant guide(s) into tool output`);
                 }
             }
         },
