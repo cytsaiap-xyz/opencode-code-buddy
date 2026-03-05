@@ -16,7 +16,7 @@ export const defaultConfig: PluginConfig = {
     },
     storage: {
         dataDir: ".opencode/code-buddy/data",
-        format: "json",
+        format: "markdown",
     },
     features: {
         memory: true,
