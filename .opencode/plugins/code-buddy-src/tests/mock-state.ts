@@ -16,7 +16,7 @@ export function createMockState(overrides: {
         config: {
             enabled: true,
             llm: { preferredProvider: "", preferredModel: "", maxTokens: 1000, temperature: 0.7 },
-            storage: { dataDir: "/tmp/test" },
+            storage: { dataDir: "/tmp/test", format: "json" },
             features: { memory: true, knowledgeGraph: false, errorLearning: false, workflow: false, ai: true, verbose: false },
             hooks: {
                 autoRemind: false, protectEnv: false, trackFiles: false, compactionContext: false,
@@ -41,7 +41,18 @@ export function createMockState(overrides: {
         relations: [],
         mistakes: [],
         pendingDeletion: null,
-        storage: { read: vi.fn(() => []), write: vi.fn() } as any,
+        storage: { read: vi.fn(() => []), write: vi.fn(), getBaseDir: vi.fn(() => "/tmp/test") } as any,
+        backend: {
+            getBaseDir: vi.fn(() => "/tmp/test"),
+            readMemories: vi.fn(() => []),
+            writeMemories: vi.fn(),
+            readEntities: vi.fn(() => []),
+            writeEntities: vi.fn(),
+            readRelations: vi.fn(() => []),
+            writeRelations: vi.fn(),
+            readMistakes: vi.fn(() => []),
+            writeMistakes: vi.fn(),
+        } as any,
         configPath: "/tmp/test-config.json",
         saveMemories: vi.fn(),
         saveEntities: vi.fn(),

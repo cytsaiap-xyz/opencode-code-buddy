@@ -20,6 +20,8 @@ import {
     addMemoryWithDedup, autoGenerateTags,
 } from "./llm";
 import type { PluginState } from "./state";
+import { MarkdownStorage } from "./markdown-storage";
+import * as fs from "node:fs";
 
 // ============================================
 // Factory — returns an object of all tools
@@ -65,6 +67,10 @@ export function createTools(s: PluginState) {
                     `| preferredModel | ${s.config.llm.preferredModel || "(auto)"} |`,
                     `| maxTokens | ${s.config.llm.maxTokens} |`,
                     `| temperature | ${s.config.llm.temperature} |`,
+                    `\n### Storage`,
+                    `| Setting | Value |\n|---------|-------|`,
+                    `| dataDir | ${s.config.storage.dataDir} |`,
+                    `| format | ${s.config.storage.format || "json"} |`,
                     `\n### Features`,
                     `| Setting | Value |\n|---------|-------|`,
                     `| memory | ${b(f.memory)} |`,
@@ -225,6 +231,11 @@ export function createTools(s: PluginState) {
 | \`buddy_ask_ai(prompt)\` | Ask AI using OpenCode's LLM |
 | \`buddy_analyze_code(code)\` | AI code analysis |
 | \`buddy_suggest_improvements(context)\` | AI improvement suggestions |
+
+## 🔄 Storage
+| Command | Description |
+|---------|-------------|
+| \`buddy_migrate_storage(target, confirm)\` | Migrate between JSON and markdown storage |
 
 ## 📋 Diagnostics
 | Command | Description |
@@ -810,6 +821,117 @@ ${warnings.length > 0 ? `### ⚠️ Warnings\n${warnings.join("\n")}` : ""}`;
                 const response = await askAI(s, `Based on this context, suggest improvements for ${type}:\n\n${args.context}${memCtx}\n\nProvide actionable, specific suggestions.`);
 
                 return `## 💡 Improvement Suggestions (${type})\n\n### Context\n${args.context}\n\n### Suggestions\n${response}`;
+            },
+        }),
+
+        // ========================================
+        // STORAGE MIGRATION
+        // ========================================
+
+        buddy_migrate_storage: tool({
+            description: "Migrate storage from JSON to markdown format (or vice versa). Creates backup of existing data before migration.",
+            args: {
+                target: tool.schema.string().describe("Target format: 'markdown' or 'json'"),
+                confirm: tool.schema.boolean().optional().describe("Set true to execute migration (default: dry run preview)"),
+            },
+            async execute(args: any) {
+                const target = args.target?.toLowerCase();
+                if (target !== "markdown" && target !== "json") {
+                    return `❌ Invalid target format: "${args.target}". Use 'markdown' or 'json'.`;
+                }
+
+                const currentFormat = s.config.storage.format || "json";
+                if (currentFormat === target) {
+                    return `ℹ️ Storage is already using **${target}** format. No migration needed.`;
+                }
+
+                // Dry run: show what will be migrated
+                if (!args.confirm) {
+                    return `## 🔄 Storage Migration Preview
+
+**From**: ${currentFormat}
+**To**: ${target}
+
+### Data to migrate
+- **Memories**: ${s.memories.length} entries
+- **Entities**: ${s.entities.length} entities
+- **Relations**: ${s.relations.length} relations
+- **Mistakes**: ${s.mistakes.length} records
+
+### What will happen
+1. Current ${currentFormat} data files will be backed up (suffixed \`.backup\`)
+2. All data will be written in ${target} format
+3. Config will be updated to \`storage.format: "${target}"\`
+${target === "markdown" ? `4. Memory entries → \`entries/*.md\` (one file per entry)\n5. Mistakes → \`mistakes/*.md\` (one file per record)\n6. Knowledge graph → \`graph.yaml\`\n7. Index → \`index.yaml\` (auto-generated)` : `4. All data → \`memory.json\`, \`entities.json\`, \`relations.json\`, \`mistakes.json\``}
+
+### To execute
+\`\`\`
+buddy_migrate_storage(target: "${target}", confirm: true)
+\`\`\``;
+                }
+
+                // Execute migration
+                const dataDir = s.storage.getBaseDir();
+
+                try {
+                    // Step 1: Backup current files
+                    const backupSuffix = `.backup-${Date.now()}`;
+                    if (currentFormat === "json") {
+                        for (const file of ["memory.json", "entities.json", "relations.json", "mistakes.json"]) {
+                            const src = `${dataDir}/${file}`;
+                            if (fs.existsSync(src)) {
+                                fs.copyFileSync(src, `${src}${backupSuffix}`);
+                            }
+                        }
+                    } else {
+                        // Backup markdown dirs
+                        const entriesDir = `${dataDir}/entries`;
+                        const mistakesDir = `${dataDir}/mistakes`;
+                        const graphFile = `${dataDir}/graph.yaml`;
+                        if (fs.existsSync(entriesDir)) {
+                            fs.cpSync(entriesDir, `${entriesDir}${backupSuffix}`, { recursive: true });
+                        }
+                        if (fs.existsSync(mistakesDir)) {
+                            fs.cpSync(mistakesDir, `${mistakesDir}${backupSuffix}`, { recursive: true });
+                        }
+                        if (fs.existsSync(graphFile)) {
+                            fs.copyFileSync(graphFile, `${graphFile}${backupSuffix}`);
+                        }
+                    }
+
+                    // Step 2: Write data in new format
+                    if (target === "markdown") {
+                        const mdStorage = new MarkdownStorage(dataDir, s.log.bind(s));
+                        mdStorage.writeMemories(s.memories);
+                        mdStorage.writeEntities(s.entities);
+                        mdStorage.writeRelations(s.relations);
+                        mdStorage.writeMistakes(s.mistakes);
+                    } else {
+                        s.storage.write("memory.json", s.memories);
+                        s.storage.write("entities.json", s.entities);
+                        s.storage.write("relations.json", s.relations);
+                        s.storage.write("mistakes.json", s.mistakes);
+                    }
+
+                    // Step 3: Update config
+                    (s.config.storage as any).format = target;
+                    fs.writeFileSync(s.configPath, JSON.stringify(s.config, null, 4), "utf-8");
+
+                    return `## ✅ Migration Complete
+
+**Migrated to**: ${target} format
+- **Memories**: ${s.memories.length} entries
+- **Entities**: ${s.entities.length} entities
+- **Relations**: ${s.relations.length} relations
+- **Mistakes**: ${s.mistakes.length} records
+
+Backup files saved with suffix \`${backupSuffix}\`.
+
+⚠️ **Restart the plugin** for the new storage backend to take effect.
+To revert, run \`buddy_migrate_storage(target: "${currentFormat}", confirm: true)\`.`;
+                } catch (err: any) {
+                    return `❌ Migration failed: ${err.message || err}\n\nYour data has not been modified. Backup files (if created) are safe.`;
+                }
             },
         }),
 

@@ -13,6 +13,9 @@ import { PluginState } from "./state";
 import { getLLMStatus, testLLMConnection } from "./llm";
 import { createTools } from "./tools";
 import { createHooks } from "./hooks";
+import { JsonStorageBackend } from "./storage-interface";
+import { MarkdownStorage } from "./markdown-storage";
+import type { StorageBackend } from "./storage-interface";
 
 export const CodeBuddyPlugin: Plugin = async (ctx) => {
     const { client } = ctx;
@@ -23,8 +26,20 @@ export const CodeBuddyPlugin: Plugin = async (ctx) => {
     // Create a verbose-aware log for early subsystems (before state exists)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const log = (...args: any[]) => { if (config.features.verbose !== false) console.log(...args); };
-    const storage = new LocalStorage(path.join(globalBase, "data"), log);
-    const state = new PluginState(storage, config, configPath, client);
+    const dataDir = path.join(globalBase, "data");
+    const storage = new LocalStorage(dataDir, log);
+
+    // Create the storage backend based on config
+    let backend: StorageBackend;
+    if (config.storage.format === "markdown") {
+        backend = new MarkdownStorage(dataDir, log);
+        log("[code-buddy] Using markdown storage backend");
+    } else {
+        backend = new JsonStorageBackend(storage);
+        log("[code-buddy] Using JSON storage backend");
+    }
+
+    const state = new PluginState(storage, config, configPath, client, backend);
 
     // When disabled, only expose buddy_config so the user can re-enable
     if (config.enabled === false) {

@@ -185,7 +185,8 @@ export function createHooks(s: PluginState) {
                     synthetic: true,
                 });
 
-                s.log(`[code-buddy] 📚 Injected ${guides.length} guide(s) into user prompt [${sessionId}]`);
+                const guideTitles = guides.map((g) => `"${g.title}"`).join(", ");
+                s.log(`[code-buddy] 📚 Injected ${guides.length} guide(s) into user prompt [${sessionId}]: ${guideTitles}`);
             } else {
                 s.log(`[code-buddy] 📚 No matching guides found for user prompt [${sessionId}]`);
             }

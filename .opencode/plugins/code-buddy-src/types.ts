@@ -133,6 +133,8 @@ export interface PluginConfig {
     };
     storage: {
         dataDir: string;
+        /** Storage format: "json" (legacy) or "markdown" (hybrid markdown+YAML). */
+        format: "json" | "markdown";
     };
     features: {
         memory: boolean;
