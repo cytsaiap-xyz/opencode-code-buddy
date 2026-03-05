@@ -123,6 +123,41 @@ export function calculateGuideRelevance(query: string, document: string): number
     return minSize > 0 ? intersection / minSize : 0;
 }
 
+// ---- Injection sanitization ----
+
+/**
+ * Prompt injection patterns to strip from memory content before injection.
+ * These patterns are commonly used to manipulate LLM behavior.
+ */
+const INJECTION_PATTERNS: RegExp[] = [
+    // System/instruction override attempts
+    /\[?\s*(?:SYSTEM|ADMIN|ROOT)\s*(?:OVERRIDE|PROMPT|MESSAGE|INSTRUCTION)\s*[:\]]/gi,
+    /(?:^|\n)\s*(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+)?(?:previous|prior|above|earlier|preceding)\s+(?:instructions?|prompts?|rules?|guidelines?|context)/gi,
+    /(?:^|\n)\s*(?:new|updated|revised|corrected)\s+(?:system\s+)?(?:instructions?|prompt|rules?|guidelines?)\s*:/gi,
+    /(?:^|\n)\s*you\s+(?:are|must)\s+now\s+(?:a|an)\s+(?:unrestricted|unfiltered|jailbroken|uncensored)/gi,
+    // Role reassignment
+    /(?:^|\n)\s*(?:from\s+now\s+on|henceforth|going\s+forward)\s*,?\s*(?:you\s+(?:are|will|should|must)|act\s+as|pretend\s+to\s+be|behave\s+as)/gi,
+    // Hidden instruction markers
+    /<!--\s*(?:SYSTEM|HIDDEN|SECRET|INJECT)\s*[^>]*-->/gi,
+    // Fake XML/tag-based injection
+    /<\s*(?:system|instruction|override|admin|prompt|role)\s*>/gi,
+    /<\s*\/\s*(?:system|instruction|override|admin|prompt|role)\s*>/gi,
+];
+
+/**
+ * Sanitize text before injecting into chat messages, tool outputs, or compaction context.
+ * Strips known prompt injection patterns and wraps the content to clearly mark it as data.
+ *
+ * This does NOT prevent all attacks — it raises the bar against common patterns.
+ */
+export function sanitizeForInjection(text: string, maxLen: number): string {
+    let cleaned = text.substring(0, maxLen);
+    for (const pattern of INJECTION_PATTERNS) {
+        cleaned = cleaned.replace(pattern, "[filtered]");
+    }
+    return cleaned;
+}
+
 // ---- Date formatting ----
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];

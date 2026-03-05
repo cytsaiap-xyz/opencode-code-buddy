@@ -12,6 +12,7 @@ import {
     generateId, generateConfirmCode, searchText,
     getMemoryCategory, detectTaskType, estimateComplexity,
     formatDate, formatDateTime, nowTimestamp,
+    sanitizeForInjection,
     TASK_STEPS, WORKFLOW_STEPS, WORKFLOW_PROGRESS,
 } from "./helpers";
 import {
@@ -352,11 +353,12 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                 if (args.type) results = results.filter((m) => m.type === args.type);
                 results = results.slice(0, args.limit || 5);
 
-                if (results.length === 0) return `🔍 No memories found for "${args.query}"`;
+                const safeQuery = sanitizeForInjection(args.query, 200);
+                if (results.length === 0) return `🔍 No memories found for "${safeQuery}"`;
 
-                let msg = `## 🔍 Search Results for "${args.query}" (${results.length})\n\n`;
+                let msg = `## 🔍 Search Results for "${safeQuery}" (${results.length})\n\n`;
                 for (const m of results) {
-                    msg += `### ${m.title}\n- **Type**: ${m.type}\n- **Date**: ${formatDate(m.timestamp)}\n- **Tags**: ${m.tags.join(", ")}\n\n${m.content}\n\n---\n\n`;
+                    msg += `### ${sanitizeForInjection(m.title, 200)}\n- **Type**: ${m.type}\n- **Date**: ${formatDate(m.timestamp)}\n- **Tags**: ${m.tags.join(", ")}\n\n${sanitizeForInjection(m.content, 2000)}\n\n---\n\n`;
                 }
                 return msg;
             },
@@ -373,7 +375,7 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
 
                 let msg = `## 📜 Recent Memories (${recent.length})\n\n`;
                 for (const m of recent) {
-                    msg += `- **${m.title}** (${m.type}/${getMemoryCategory(m)}) - ${formatDate(m.timestamp)}\n`;
+                    msg += `- **${sanitizeForInjection(m.title, 200)}** (${m.type}/${getMemoryCategory(m)}) - ${formatDate(m.timestamp)}\n`;
                 }
                 return msg;
             },
@@ -397,13 +399,14 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
                 filtered = filtered.sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, args.limit || 10);
 
                 if (filtered.length === 0) {
-                    return `📂 No ${cat} memories found${args.query ? ` matching "${args.query}"` : ""}.`;
+                    const safeQuery = args.query ? sanitizeForInjection(args.query, 200) : "";
+                    return `📂 No ${cat} memories found${safeQuery ? ` matching "${safeQuery}"` : ""}.`;
                 }
 
                 const typeLabels = cat === "solution" ? "(decision, bugfix, lesson)" : "(pattern, feature, note)";
                 let output = `## 📂 ${cat.charAt(0).toUpperCase() + cat.slice(1)} Memories ${typeLabels}\n\n**Found**: ${filtered.length} item(s)\n\n`;
                 for (const m of filtered) {
-                    output += `### ${m.title}\n- **Type**: ${m.type} | **ID**: \`${m.id}\`\n- **Date**: ${formatDateTime(m.timestamp)}\n- **Content**: ${m.content.substring(0, 150)}${m.content.length > 150 ? "..." : ""}\n\n`;
+                    output += `### ${sanitizeForInjection(m.title, 200)}\n- **Type**: ${m.type} | **ID**: \`${m.id}\`\n- **Date**: ${formatDateTime(m.timestamp)}\n- **Content**: ${sanitizeForInjection(m.content, 150)}${m.content.length > 150 ? "..." : ""}\n\n`;
                 }
                 return output;
             },
@@ -594,11 +597,12 @@ ${args.learnings ? `### 💡 Learnings\n${args.learnings}\n` : ""}### 📊 Memor
             },
             async execute(args: any) {
                 const results = searchText(s.entities, args.query, ["name", "observations", "tags"]).slice(0, args.limit || 10);
-                if (results.length === 0) return `🔍 No entities found for "${args.query}"`;
+                const safeQuery = sanitizeForInjection(args.query, 200);
+                if (results.length === 0) return `🔍 No entities found for "${safeQuery}"`;
 
-                let msg = `## 🔗 Entities for "${args.query}" (${results.length})\n\n`;
+                let msg = `## 🔗 Entities for "${safeQuery}" (${results.length})\n\n`;
                 for (const e of results) {
-                    msg += `### ${e.name}\n- **Type**: ${e.type}\n- **Observations**: ${e.observations.slice(0, 2).join("; ")}\n\n`;
+                    msg += `### ${sanitizeForInjection(e.name, 200)}\n- **Type**: ${e.type}\n- **Observations**: ${e.observations.slice(0, 2).map((o: string) => sanitizeForInjection(o, 300)).join("; ")}\n\n`;
                 }
                 return msg;
             },
