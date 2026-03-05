@@ -12,6 +12,7 @@ import type {
     SessionState, Observation, SessionBuffer, PendingDeletion, ProviderInfo, PluginConfig,
 } from "./types";
 import { LocalStorage } from "./storage";
+import type { StorageBackend } from "./storage-interface";
 import { getMemoryCategory, nowTimestamp } from "./helpers";
 
 const MAX_LOG_BYTES = 512 * 1024; // 512 KB before rotation
@@ -32,22 +33,36 @@ export class PluginState {
 
     // References
     readonly storage: LocalStorage;
+    readonly backend: StorageBackend;
     readonly config: PluginConfig;
     readonly configPath: string;
     readonly client: any; // OpenCode SDK client
     private readonly logFilePath: string;
 
-    constructor(storage: LocalStorage, config: PluginConfig, configPath: string, client: unknown) {
+    constructor(storage: LocalStorage, config: PluginConfig, configPath: string, client: unknown, backend?: StorageBackend) {
         this.storage = storage;
         this.config = config;
         this.configPath = configPath;
         this.client = client;
         this.logFilePath = path.join(storage.getBaseDir(), "plugin.log");
 
-        this.memories = storage.read("memory.json", []);
-        this.entities = storage.read("entities.json", []);
-        this.relations = storage.read("relations.json", []);
-        this.mistakes = storage.read("mistakes.json", []);
+        // Use the provided StorageBackend, or fall back to raw LocalStorage reads
+        this.backend = backend || {
+            getBaseDir: () => storage.getBaseDir(),
+            readMemories: () => storage.read("memory.json", []),
+            writeMemories: (m) => storage.write("memory.json", m),
+            readEntities: () => storage.read("entities.json", []),
+            writeEntities: (e) => storage.write("entities.json", e),
+            readRelations: () => storage.read("relations.json", []),
+            writeRelations: (r) => storage.write("relations.json", r),
+            readMistakes: () => storage.read("mistakes.json", []),
+            writeMistakes: (m) => storage.write("mistakes.json", m),
+        };
+
+        this.memories = this.backend.readMemories();
+        this.entities = this.backend.readEntities();
+        this.relations = this.backend.readRelations();
+        this.mistakes = this.backend.readMistakes();
 
         this.session = {
             sessionId: `session_${Date.now()}`,
@@ -63,16 +78,16 @@ export class PluginState {
     // ---- Persistence ----
 
     saveMemories(): void {
-        this.storage.write("memory.json", this.memories);
+        this.backend.writeMemories(this.memories);
     }
     saveEntities(): void {
-        this.storage.write("entities.json", this.entities);
+        this.backend.writeEntities(this.entities);
     }
     saveRelations(): void {
-        this.storage.write("relations.json", this.relations);
+        this.backend.writeRelations(this.relations);
     }
     saveMistakes(): void {
-        this.storage.write("mistakes.json", this.mistakes);
+        this.backend.writeMistakes(this.mistakes);
     }
 
     // ---- Category-based queries ----
